@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>scarlet devil mansion</title>
+  <style>
+    html, body { height: 100%; margin: 0; background: #0f1115; color: #e6e6e6; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    #game { margin: 16px auto; width: fit-content; }
+    .panel { max-width: 960px; margin: 0 auto; padding: 0 16px 16px; }
+    .hint { opacity: .8; font-size: 12px; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    button { background: #1c1f27; color: #e6e6e6; border: 1px solid #2a2f3a; border-radius: 10px; padding: 6px 10px; cursor: pointer; }
+    button:hover { filter: brightness(1.1); }
+
+    /* 화면 배율만 2배 확대(보여주는 영역은 그대로) */
+    canvas {
+      transform: scale(2);
+      transform-origin: top left;
+      image-rendering: pixelated;
+    }
+  </style>
+  <script src="./phaser.min.js"></script>
+</head>
+<body>
+  <div class="panel">
+    <h1>scarlet devil mansion</h1>
+    <div class="hint">WASD 타일 단위 이동 · 카메라 추적</div>
+    <div class="row" style="margin:8px 0;">
+      <button id="reloadBtn">맵 다시불러오기</button>
+    </div>
+  </div>
+  <div id="game"></div>
+
+  <script>
+    // -----------------------------
+    // 전역 상수
+    // -----------------------------
+    const TILE_SIZE = 16;       // 타일 크기(px)
+    const START_TX = 4;         // 시작 타일 X (원하는 값)
+    const START_TY = 51;        // 시작 타일 Y (원하는 값)
+    const MOVE_DURATION = 150;  // 1타일 이동 트윈 시간(ms)
+    const HOLD_INITIAL_DELAY = 160; // ms: 키를 누른 직후 첫 반복까지 대기
+    const HOLD_REPEAT_DELAY  = 150; // ms: 이후 반복 간격(보통 MOVE_DURATION과 같게)
+
+    // -----------------------------
+    // Phaser 설정
+    // -----------------------------
+    const config = {
+      type: Phaser.AUTO,
+      parent: 'game',
+      width: 10 * TILE_SIZE,    // 내부 해상도(카메라가 보이는 영역 크기) — CSS scale로 실제 표시는 2배
+      height: 7 * TILE_SIZE,
+      backgroundColor: '#0f1115',
+      physics: { default: 'arcade', arcade: { debug: false } },
+      scene: { preload, create, update }
+    };
+    new Phaser.Game(config);
+
+    // -----------------------------
+    // 씬 함수
+    // -----------------------------
+    function preload() {
+      // Tiled JSON (tmj) + 임베드된 타일셋 이미지
+      this.load.tilemapTiledJSON('map1', 'mapping/map1.tmj');
+      this.load.image('map1_orgin', 'map/map1_orgin.png');
+
+      // 플레이어 텍스처(간단한 원형) 런타임 생성 예정
+    }
+
+    function create() {
+      // 1) 타일맵/레이어 구성
+      const map = this.make.tilemap({ key: 'map1' });
+      const tileset = map.addTilesetImage('map1', 'map1_orgin', TILE_SIZE, TILE_SIZE, 0, 0);
+      const groundLayer = map.createLayer('바닥', tileset, 0, 0);
+      const wallLayer   = map.createLayer('벽',   tileset, 0, 0);
+
+      // 월드/카메라 경계 = 맵 픽셀 크기
+      this.physics.world.setBounds(0, 0, map.widthInPixels, map.heightInPixels);
+      this.cameras.main.setBounds(0, 0, map.widthInPixels, map.heightInPixels);
+
+      // 레이어 깊이(플레이어가 위에 보이도록)
+      groundLayer.setDepth(0);
+      wallLayer.setDepth(1);
+
+      // 2) 플레이어 생성(원형 텍스처)
+      const g = this.make.graphics({ x: 0, y: 0, add: false });
+      g.fillStyle(0x00d4ff, 1);
+      g.fillCircle(8, 8, 8);
+      g.generateTexture('playerTex', 16, 16);
+      g.destroy();
+
+      const player = this.physics.add.image(0, 0, 'playerTex');
+      player.setDepth(10);
+      player.body.setAllowGravity(false);
+      player.setCollideWorldBounds(true);
+
+      // 3) 상태/헬퍼를 this에 바인딩(UPDATE에서 접근하려고)
+      this.map = map;
+      this.wallLayer = wallLayer;
+      this.player = player;
+      this.TILE = TILE_SIZE;
+      this.grid = { tx: START_TX, ty: START_TY, moving: false };
+
+      this.toWorld = (t) => t * this.TILE + this.TILE / 2;
+      this.inBounds = (tx, ty) => tx >= 0 && ty >= 0 && tx < this.map.width && ty < this.map.height;
+      this.isWalkable = (tx, ty) => this.inBounds(tx, ty) && !this.wallLayer.hasTileAt(tx, ty);
+
+      // 4) 시작 타일 중심에 위치 스냅
+      player.setPosition(this.toWorld(START_TX), this.toWorld(START_TY));
+
+      // 5) 카메라 추적(플레이어 위치 세팅 후 호출)
+      this.cameras.main.startFollow(player, true, 0.15, 0.15);
+
+      // 6) 입력
+      this.keys = this.input.keyboard.addKeys({
+        W: Phaser.Input.Keyboard.KeyCodes.W,
+        A: Phaser.Input.Keyboard.KeyCodes.A,
+        S: Phaser.Input.Keyboard.KeyCodes.S,
+        D: Phaser.Input.Keyboard.KeyCodes.D,
+      });
+
+      // 7) (옵션) 충돌 레이어 collider는 타일 단위 이동에선 불필요.
+      //    사전 타일 체크(isWalkable)로 해결하므로 끄는 것이 트윈 간섭이 없다.
+      // this.physics.add.collider(player, wallLayer);
+
+      // 8) 입력 큐 & 이동 함수(연속 이동 지원)
+      this.inputQueue = [];
+      this._dequeueMove = () => {
+        if (this.grid.moving || this.inputQueue.length === 0) return;
+
+        const { dx, dy } = this.inputQueue.shift();
+        const nx = this.grid.tx + dx;
+        const ny = this.grid.ty + dy;
+
+        if (!this.isWalkable(nx, ny)) {
+          // 불가면 다음 입력 바로 시도
+          this._dequeueMove();
+          return;
+        }
+
+        this.grid.moving = true;
+
+        // 트윈 동안 물리 보디 간섭 제거
+        const prevEnabled = this.player.body.enable;
+        this.player.body.enable = false;
+
+        this.tweens.add({
+          targets: this.player,
+          x: this.toWorld(nx),
+          y: this.toWorld(ny),
+          duration: MOVE_DURATION,
+          ease: 'Linear',
+          onComplete: () => {
+            this.grid.tx = nx;
+            this.grid.ty = ny;
+            this.grid.moving = false;
+            this.player.body.enable = prevEnabled;
+            // 연속 입력 처리
+            this._dequeueMove();
+          }
+        });
+      };
+
+      // UI: 재시작 버튼
+      document.getElementById('reloadBtn').onclick = () => this.scene.restart();
+
+      // 키 홀드 상태 머신
+      this.hold = {
+        dir: null,        // 'up'|'down'|'left'|'right' or null
+        timer: 0          // 남은 ms
+      };
+    }
+
+    function update(time, delta) {
+      if (!this.keys) return;
+    
+      // 현재 눌림 상태 읽기 (우선순위는 기존처럼 W>S>A>D)
+      let wantDir = null;
+      if (this.keys.W.isDown) wantDir = 'up';
+      else if (this.keys.S.isDown) wantDir = 'down';
+      else if (this.keys.A.isDown) wantDir = 'left';
+      else if (this.keys.D.isDown) wantDir = 'right';
+    
+      // 키를 완전히 놓았을 때 → 상태 초기화
+      if (!wantDir) {
+        this.hold.dir = null;
+        this.hold.timer = 0;
+        return;
+      }
+    
+      // 새 방향으로 전환되었으면 초기 지연부터 시작
+      if (this.hold.dir !== wantDir) {
+        this.hold.dir = wantDir;
+        this.hold.timer = 0; // 바로 한 칸 시도하도록 0으로 두거나, HOLD_INITIAL_DELAY로 두면 살짝 딜레이
+      }
+    
+      // 타이머 갱신
+      this.hold.timer -= delta;
+      if (this.hold.timer > 0) return;
+    
+      // 이동 중이면 큐만 채우지 말고, 다음 틱에 다시 시도
+      if (this.grid.moving) {
+        // 이동 중이면 타이머를 짧게 재설정해 다음 프레임 근처에서 재확인
+        this.hold.timer = 16;
+        return;
+      }
+    
+      // 방향 → (dx, dy) 매핑
+      let dx = 0, dy = 0;
+      switch (this.hold.dir) {
+        case 'up':    dy = -1; break;
+        case 'down':  dy =  1; break;
+        case 'left':  dx = -1; break;
+        case 'right': dx =  1; break;
+      }
+    
+      // 목표 타일
+      const nx = this.grid.tx + dx;
+      const ny = this.grid.ty + dy;
+    
+      // 통행 가능하면 큐에 넣고, 아니면 다음 반복까지 대기
+      if (this.isWalkable(nx, ny)) {
+        this.inputQueue.push({ dx, dy });
+        if (!this.grid.moving) this._dequeueMove();
+    
+        // 첫 반복 이후엔 반복 간격으로 세팅
+        this.hold.timer = HOLD_REPEAT_DELAY;
+      } else {
+        // 막혀 있으면 살짝 뒤로 미뤄 재시도 (원하면 HOLD_REPEAT_DELAY로 동일하게)
+        this.hold.timer = HOLD_REPEAT_DELAY;
+      }
+    }
+    
+  </script>
+</body>
+</html>
