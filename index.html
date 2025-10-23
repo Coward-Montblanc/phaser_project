@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>scarlet devil mansion</title>
+  <style>
+    html, body { height: 100%; margin: 0; background: #0f1115; color: #e6e6e6; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    #game { margin: 16px auto; width: fit-content; }
+    .panel { max-width: 960px; margin: 0 auto; padding: 0 16px 16px; }
+    .hint { opacity: .8; font-size: 12px; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    button { background: #1c1f27; color: #e6e6e6; border: 1px solid #2a2f3a; border-radius: 10px; padding: 6px 10px; cursor: pointer; }
+    button:hover { filter: brightness(1.1); }
+
+    /* 화면 배율 */
+    canvas {
+      transform: scale(3);
+      transform-origin: top center;
+      image-rendering: pixelated;
+    }
+
+    /* 좌상단 토글 버튼 고정 배치 */
+    .floating {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      display: flex;
+      gap: 8px;
+      z-index: 99999;
+    }
+  </style>
+  <script src="./phaser.min.js"></script>
+</head>
+<body>
+  <div class="panel">
+    <h1>scarlet devil mansion</h1>
+    <div class="hint">WASD</div>
+  </div>
+
+  <!-- 좌상단 고정 토글 버튼 -->
+  <div class="floating">
+    <button id="modeBtn">격자 이동: OFF</button>
+    <button id="reloadBtn">맵 다시불러오기</button>
+  </div>
+
+  <div id="game"></div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
