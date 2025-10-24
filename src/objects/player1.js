@@ -1,4 +1,5 @@
 import Player, { FACING_TO_RAD } from './Player.js';
+import { runDash } from '../SkillMech/Dash.js';
 
 export default class Player1 extends Player {
   constructor(scene, tx, ty) {
@@ -12,9 +13,23 @@ export default class Player1 extends Player {
     // 히트박스용 원 텍스처(지름=2R) 1회 생성
     this.HIT_R = 6;
     this.HIT_TEX = this._ensureHitTexture(scene, this.HIT_R);
+    // 히트박스 전용 그룹(겹침 판정용, 보이진 않음)
+    this.dashGroup = scene.physics.add.group({ allowGravity: false, immovable: true });
 
     // 스킬 구현 바인딩
     this.onSkillU = () => this._skillSlash180();
+    this.onSkillI = () => this._skillDashHit();
+
+    // === 캐릭터 고유 스탯 ===
+    this.maxHp = 20;
+    this.hp = this.maxHp;
+    this.events.emit('hp:changed', { hp: this.hp, maxHp: this.maxHp });
+    this.speed = 150;  // 캐릭터별 이동속도
+
+    // === 캐릭터 고유 스킬 수치 ===
+    this.SLASH_DAMAGE = 3;
+    this.DASH_DAMAGE  = 5;
+    this.DASH_COOLDOWN_MS = 2000;
   }
 
     _ensureHitTexture(scene, r) {
@@ -33,7 +48,7 @@ export default class Player1 extends Player {
     const scene = this.scene;
 
     // 쿨다운 & 연출 파라미터
-    const COOLDOWN = 500;
+    const COOLDOWN = 400;
     const LIFETIME = 50;
     const RADIUS   = 48;      // 부채꼴 시각효과 끝 반경
     const RINGS    = 3;
@@ -75,6 +90,7 @@ export default class Player1 extends Player {
         dot.setOrigin(0.5, 0.5);
         dot.setVisible(false);                // 디버그 시 true
         dot.owner = this;
+        dot.damage = this.SLASH_DAMAGE;       // ⬅️ 슬래시 피해량
         dot.body.setAllowGravity(false);
         dot.body.setImmovable(true);
         dot.body.setCircle(HIT_R, 0, 0);      // 중심 = (px, py)
@@ -84,6 +100,35 @@ export default class Player1 extends Player {
     }
     // 실제 타격은 GameScene 쪽 overlap 콜백에서 처리(아래 참고)
   }
+
+  /** 전방 대시 */
+  _skillDashHit() {
+    // 캐릭터 고유 쿨타임
+    this.setCooldown('I', this.DASH_COOLDOWN_MS);
+    runDash(this, {
+        distance: 100,
+        speed: 900,
+        width: 12,
+        damage: this.DASH_DAMAGE,     // ⬅️ 대시 피해량
+        wall: {
+          layer: this.wallLayer,          // GameScene에서 this.player.wallLayer = this.wallLayer; 해둔 값
+          mode: 'block_landing',          // 'always' | 'block_landing' | 'block_all'
+          pad: this.HIT_R + 1,
+        },
+        hit: {
+          enabled: true,
+          radius: this.HIT_R,
+          step: this.HIT_R * 1.2,
+          group: this.dashGroup,          // 없으면 모듈이 자동 생성
+        },
+        effect: {
+          // spriteKey: 'dashBeam',       // 나중에 스프라이트 쓰고 싶으면 키 전달
+          color: 0xC50058,
+          alpha: 0.35,
+        },
+      });
+  }  
+  
 
   _facingAngleRad() {
     return FACING_TO_RAD[this.facing] ?? 0;

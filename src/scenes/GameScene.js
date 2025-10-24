@@ -1,9 +1,7 @@
 import Player1 from '../objects/player1.js';
+import HUD from "../ui/HUD.js";
 import { TeleportManager } from '../services/teleport.js';
-import {
-  TILE_SIZE, START_TX, START_TY,
-  MOVE_DURATION, HOLD_REPEAT_DELAY
-} from '../constants.js';
+import { GAME } from '../constants.js';
 
 export default class GameScene extends Phaser.Scene {
   constructor() {
@@ -21,7 +19,7 @@ export default class GameScene extends Phaser.Scene {
   create() {
     // --- 맵/레이어 ---
     const map = this.make.tilemap({ key: 'map1' });
-    const tileset = map.addTilesetImage('map1', 'map1_orgin', TILE_SIZE, TILE_SIZE, 0, 0);
+    const tileset = map.addTilesetImage('map1', 'map1_orgin', GAME.TILE_SIZE, GAME.TILE_SIZE, 0, 0);
     const groundLayer = map.createLayer('바닥', tileset, 0, 0);
     const decoLayer   = map.createLayer('장식', tileset, 0, 0);
     const wallLayer   = map.createLayer('벽',   tileset, 0, 0);
@@ -32,15 +30,21 @@ export default class GameScene extends Phaser.Scene {
     groundLayer.setDepth(0); decoLayer.setDepth(2); wallLayer.setDepth(3);
 
     // --- 플레이어 ---
-    this.player = new Player1(this, START_TX, START_TY);
+    this.player = new Player1(this, GAME.START_TILE.X, GAME.START_TILE.Y);
+    // 대시 모듈이 벽 레이어를 참조할 수 있도록 연결
+    this.player.wallLayer = wallLayer;
+
+    // HUD 연결
+    this.hud = new HUD(this);
+    this.hud.bind(this.player);
 
     // --- 상태/헬퍼 ---
     this.map = map;
     this.wallLayer = wallLayer;
-    this.grid = { tx: START_TX, ty: START_TY, moving: false };
+    this.grid = { tx: GAME.START_TILE.X, ty: GAME.START_TILE.Y, moving: false };
     this.facing = this.player.facing;
 
-    this.toWorld = (t) => t * TILE_SIZE + TILE_SIZE / 2;
+    this.toWorld = (t) => t * GAME.TILE_SIZE + GAME.TILE_SIZE / 2;
     this.inBounds = (tx, ty) => tx >= 0 && ty >= 0 && tx < map.width && ty < map.height;
     this.isWalkable = (tx, ty) => this.inBounds(tx, ty) && !wallLayer.hasTileAt(tx, ty);
 
@@ -59,7 +63,7 @@ export default class GameScene extends Phaser.Scene {
     this.targets = this.physics.add.group();
 
     // --- 플레이어들 생성 (테스트용 2인) ---
-    const dummy = new Player1(this, START_TX + 4, START_TY); // 맞아볼 더미
+    const dummy = new Player1(this, GAME.START_TILE.X + 4, GAME.START_TILE.Y);
 
     // 더미는 움직이지 않게
     dummy.body.moves = false;
@@ -74,7 +78,12 @@ export default class GameScene extends Phaser.Scene {
         // 자기 자신은 무시
         if (hitbox.owner === target) return;
   
-        // 임시 피격 반응
+        // 피해 적용
+        if (typeof target.receiveDamage === 'function') {
+          const dmg = hitbox.damage ?? 0;
+          if (dmg > 0) target.receiveDamage(dmg, hitbox.owner);
+        }
+        // 피격 연출
         if (!target._hitCooldown || this.time.now >= target._hitCooldown) {
           target._hitCooldown = this.time.now + 200;
           target.setTintFill(0xffffff);
@@ -84,6 +93,22 @@ export default class GameScene extends Phaser.Scene {
           }});
         }
     });
+    // 조작 주체의 dashGroup 타겟 간 겹침 판정
+    this.physics.add.overlap(this.player.dashGroup, this.targets, (hitbox, target) => {
+        if (hitbox.owner === target) return;
+        // 피해 적용
+        if (typeof target.receiveDamage === 'function') {
+          const dmg = hitbox.damage ?? 0;
+          if (dmg > 0) target.receiveDamage(dmg, hitbox.owner);
+        }
+        if (!target._hitCooldown || this.time.now >= target._hitCooldown) {
+          target._hitCooldown = this.time.now + 150;
+          target.setTintFill(0xffffff);
+          this.tweens.add({ targets: target, alpha: 0.35, yoyo: true, duration: 60, repeat: 2,
+            onComplete: () => { target.clearTint(); target.setAlpha(1); }
+          });
+        }
+      });
 
     // --- 충돌자 (자유이동 전용) ---
     this.wallCollider = this.physics.add.collider(this.player, wallLayer);
@@ -91,10 +116,10 @@ export default class GameScene extends Phaser.Scene {
 
     // --- 텔레포트 규칙 & 매니저 ---
     const tpRules = [
-      { id:'door-1', area:{tx:29,ty:77,w:1,h:1}, dir:'up',    to:{tx:30,ty:27,face:'up'} },
-      { id:'door-2', area:{tx:30,ty:27,w:1,h:1}, dir:'down',  to:{tx:29,ty:77,face:'down'} },
-      { id:'door-3', area:{tx:4, ty:4, w:1,h:1}, dir:'left',  to:{tx:59,ty:5, face:'left'} },
-      { id:'door-4', area:{tx:59,ty:5, w:1,h:1}, dir:'right', to:{tx:4, ty:4, face:'right'} },
+      { id:'door-1', area:{tx:38,ty:81,w:1,h:1}, dir:'up',    to:{tx:39,ty:31,face:'up'} },
+      { id:'door-2', area:{tx:39,ty:31,w:1,h:1}, dir:'down',  to:{tx:38,ty:81,face:'down'} },
+      { id:'door-3', area:{tx:13, ty:8, w:1,h:1}, dir:'left',  to:{tx:68,ty:9, face:'left'} },
+      { id:'door-4', area:{tx:68,ty:9, w:1,h:1}, dir:'right', to:{tx:13, ty:8, face:'right'} },
     ];
     this.tp = new TeleportManager(this, tpRules, wallLayer);
 
@@ -162,7 +187,7 @@ export default class GameScene extends Phaser.Scene {
         targets: this.player,
         x: this.toWorld(nx),
         y: this.toWorld(ny),
-        duration: MOVE_DURATION,
+        duration: GAME.MOVE_DURATION,
         ease: 'Linear',
         onComplete: () => {
           this.grid.tx = nx; this.grid.ty = ny;
@@ -213,7 +238,7 @@ export default class GameScene extends Phaser.Scene {
       }
       this.inputQueue.push({ dx, dy, dir: this.hold.dir });
       if (!this.grid.moving) this._dequeueMove();
-      this.hold.timer = HOLD_REPEAT_DELAY;
+      this.hold.timer = GAME.HOLD_REPEAT_DELAY;
 
     } else {
       // 자유 이동

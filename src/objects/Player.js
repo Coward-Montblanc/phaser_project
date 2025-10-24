@@ -1,4 +1,4 @@
-import { TILE_SIZE, FREE_SPEED } from '../constants.js';
+import { GAME } from '../constants.js';
 
 const DIR8 = ['right','down-right','down','down-left','left','up-left','up','up-right'];
 export const FACING_TO_RAD = {
@@ -33,12 +33,20 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
     this.setDepth(1);
     this.body.setAllowGravity(false);
     this.setCollideWorldBounds(true);
+    this.body.setImmovable(false);
+    this.body.moves = true;
     this.setSize(12, 12).setOffset(2, 2);
 
     // 상태
     this.facing = 'down';
     this.cooldowns = new Map(); // ex) this.cooldowns.set('U', nextUsableTimeMs)
+    this.cooldownDurations = new Map();
     this.isSkillLock = false; // 스킬 시전 중 이동 불가
+    // HP(캐릭터 파일에서 덮어쓰기 권장)
+    this.maxHp = 1;
+    this.hp = this.maxHp;
+    // HUD 등과 연동할 이벤트 버스
+    this.events = new Phaser.Events.EventEmitter();
 
     // 애니메이션
     this._ensureAnims(scene, texture);
@@ -89,8 +97,11 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
     // ...
   }
 
-  tileToWorld(t) { return t * TILE_SIZE + TILE_SIZE / 2; }
-  snapToTile(tx, ty) { this.setVelocity(0,0); this.setPosition(this.tileToWorld(tx), this.tileToWorld(ty)); }
+  tileToWorld(t) { return t * GAME.TILE_SIZE + GAME.TILE_SIZE / 2; }
+  snapToTile(tx, ty) {
+    this.setVelocity(0,0);
+    this.setPosition(this.tileToWorld(tx), this.tileToWorld(ty));
+  }
     // Player.js 내부에 유틸 추가
     _resolveAnimKey(kind /* 'walk' | 'idle' */) {
         const tex = this.texture.key;
@@ -125,7 +136,7 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
         if (cursors.D.isDown) vx += 1;
       
         if (vx && vy) { const inv = 1/Math.sqrt(2); vx*=inv; vy*=inv; }
-        this.setVelocity(vx * FREE_SPEED, vy * FREE_SPEED);
+        this.setVelocity(vx * (this.speed ?? 150), vy * (this.speed ?? 150));
       
         const f = vectorToFacing8(vx, vy);
         if (f) this.facing = f;      // 움직일 때만 방향 갱신(정지 시 마지막 방향 유지)
@@ -133,6 +144,17 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
         (vx===0 && vy===0) ? this.playIdle() : this.playWalk();
       
         this._handleSkillInput();
+
+          // --- 쿨다운 진행 상황을 HUD로 계속 보내기 ---
+          const now = this.scene.time.now;
+          for (const [key, endAt] of this.cooldowns) {
+            const maxMs = this.cooldownDurations.get(key) ?? 0;
+            const leftMs = Math.max(0, endAt - now);
+            const leftSec = leftMs / 1000;
+            const maxSec = maxMs / 1000;
+            this.events.emit('skill:cd', { id: key, cd: leftSec, max: maxSec });
+            if (leftMs <= 0) this.cooldowns.delete(key);
+          }
       }
 
   _handleSkillInput() {
@@ -143,7 +165,7 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
       const next = this.cooldowns.get('U') ?? 0;
       if (now >= next && this.onSkillU) this.onSkillU();
     }
-    // I 스킬(미래 확장)
+    // I 스킬
     if (Phaser.Input.Keyboard.JustDown(this.skillKeys.I)) {
       const next = this.cooldowns.get('I') ?? 0;
       if (now >= next && this.onSkillI) this.onSkillI();
@@ -151,6 +173,27 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
   }
 
   setCooldown(key, msFromNow) {
-    this.cooldowns.set(key, this.scene.time.now + msFromNow);
+    const now = this.scene.time.now;
+    this.cooldowns.set(key, now + msFromNow);
+    this.cooldownDurations.set(key, msFromNow);
+    // HUD가 바로 가려지도록 즉시 1회 알림(초 단위)
+    this.events.emit('skill:cd', {
+      id: key,
+      cd: msFromNow / 1000,
+      max: msFromNow / 1000
+    });
   }
+
+  // ===== HP/피해 처리 =====
+    takeDamage(n = 0) {
+        this.hp = Math.max(0, this.hp - (n|0));
+        this.events.emit('hp:changed', { hp: this.hp, maxHp: this.maxHp });
+        if (this.hp <= 0) this.events.emit('death');
+    }
+    heal(n = 0) {
+        this.hp = Math.min(this.maxHp, this.hp + (n|0));
+        this.events.emit('hp:changed', { hp: this.hp, maxHp: this.maxHp });
+    }
+    isAlive() { return this.hp > 0; }
+    receiveDamage(amount = 0, source = null) { this.takeDamage(amount); }
 }

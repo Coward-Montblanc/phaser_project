@@ -1,4 +1,4 @@
-import { TILE_SIZE } from '../constants.js';
+import { GAME } from '../constants.js';
 
 export class TeleportManager {
   /**
@@ -30,9 +30,9 @@ export class TeleportManager {
     state.grid.ty = Phaser.Math.Clamp(to.ty, 0, this.scene.map.height - 1);
     state.player.setVelocity(0, 0);
     state.player.setPosition(
-      state.grid.tx * TILE_SIZE + TILE_SIZE / 2,
-      state.grid.ty * TILE_SIZE + TILE_SIZE / 2
-    );
+    state.grid.tx * GAME.TILE_SIZE + GAME.TILE_SIZE / 2,
+    state.grid.ty * GAME.TILE_SIZE + GAME.TILE_SIZE / 2
+);
 
     // 바라볼 방향
     state.facing = to.face || state.facing;
