@@ -38,11 +38,13 @@ export default class HUD extends Phaser.GameObjects.Container {
     const sTop = this.hpY + UI.HPBAR.H + UI.PADDING.GAP;
     const rightEdge = this.hpX + UI.HPBAR.W;
     const gap = 6;
-    const s2x = rightEdge - size;
+    const s3x = rightEdge - size;
+    const s2x = s3x - gap - size;
     const s1x = s2x - gap - size;
 
-    this._ensureSkillIcon(1, s1x, sTop, size);
-    this._ensureSkillIcon(2, s2x, sTop, size);
+    this._ensureSkillIcon(1, s1x, sTop, size); // Z
+    this._ensureSkillIcon(2, s2x, sTop, size); // X
+    this._ensureSkillIcon(3, s3x, sTop, size); // C
   }
 
   _ensureSkillIcon(id, x, y, size) {
@@ -226,8 +228,8 @@ export default class HUD extends Phaser.GameObjects.Container {
 
     // 쿨다운 갱신
     this._cdHandler = ({ id, cd, max }) => {
-      // 현재 구조: I=대시(슬롯1), U=슬래시(슬롯2)
-      const slot = (id === 'I') ? 1 : 2;
+      // 매핑: Z=1, X=2, C=3
+      const slot = (id === 'Z') ? 1 : (id === 'X') ? 2 : 3;
       const ratio = (max > 0) ? Phaser.Math.Clamp(cd / max, 0, 1) : 0;
       
       this.updateSkillMask(slot, ratio, cd);
@@ -236,7 +238,8 @@ export default class HUD extends Phaser.GameObjects.Container {
 
     // 충전(스택/리차지) 갱신
     this._chargeHandler = ({ id, charges, maxCharges, rechargeLeft, rechargeMax }) => {
-      const slot = (id === 'I') ? 1 : 2;
+      // 매핑: Z=1, X=2, C=3
+      const slot = (id === 'Z') ? 1 : (id === 'X') ? 2 : 3;
       // 스택 숫자 우하단 표시
       if (this.skillStackTexts?.[slot]) {
         this.skillStackTexts[slot].setText(typeof charges === 'number' ? String(charges) : '');

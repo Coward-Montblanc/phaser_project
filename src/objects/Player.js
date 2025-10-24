@@ -47,7 +47,8 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
     this.hitProcessed = new Set(); // 중복 히트 방지용: 처리된 attackId 집합
     this.attackSeqByKey = new Map(); // 스킬 키별 세션 시퀀스
     this.currentAttackSession = new Map(); // 스킬 키별 현재 세션 ID
-    this.skillKeyHeld = { U: false, I: false }; // 각 스킬 키의 홀드 상태 추적
+    this.skillKeyHeld = { Z: false, X: false, C: false }; // 각 스킬 키의 홀드 상태 추적
+    this.skillKeyPrev = { Z: false, X: false, C: false }; // 이전 프레임 상태(JustDown 판정용)
     this.skillStaggerTimes = {}; // 각 스킬별 기절 시간 (밀리초)
     this.staggerTimer = null; // 기절 타이머 참조
     this.staggerTextCount = 0; // 현재 표시 중인 기절 텍스트 개수
@@ -66,11 +67,20 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
     // 위치
     this.snapToTile(tx, ty);
 
-    // 스킬 키 바인딩 (U/I 등)
+    // 스킬 키 바인딩 (Z/X/C)
     this.skillKeys = scene.input.keyboard.addKeys({
-      U: Phaser.Input.Keyboard.KeyCodes.U,
-      I: Phaser.Input.Keyboard.KeyCodes.I,
+      Z: Phaser.Input.Keyboard.KeyCodes.Z,
+      X: Phaser.Input.Keyboard.KeyCodes.X,
+      C: Phaser.Input.Keyboard.KeyCodes.C,
     });
+
+    // 마우스 조준 각도 고정용 상태
+    this._aimLocked = false;
+    this._aimAngleLocked = 0;
+    this._aimUnlockAt = 0;
+
+    // 스킬별 조준 각도(사용 시점의 스냅샷)
+    this._skillAimAngle = 0;
   }
 
   /** 일정 시간 동안 이동/입력 잠금 */
@@ -80,6 +90,38 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
     this.scene.time.delayedCall(ms, () => {
       this.isSkillLock = false;
     });
+  }
+
+  /** 현재 마우스 방향으로 조준 각도를 고정 */
+  lockAimFor(ms) {
+    // 현재 마우스 위치 기준(활성 포인터 + 카메라 변환)
+    const pointer = this.scene.input.activePointer;
+    pointer.updateWorldPoint(this.scene.cameras.main);
+    const dx = pointer.worldX - this.x;
+    const dy = pointer.worldY - this.y;
+    this._aimAngleLocked = Math.atan2(dy, dx);
+    this._aimLocked = true;
+    this._aimUnlockAt = this.scene.time.now + ms;
+  }
+
+  /** 현재 조준 각도(잠금 중이면 고정 각도 반환, 아니면 현재 바라보는 방향 각도) */
+  _facingAngleRad() {
+    if (this._aimLocked) return this._aimAngleLocked;
+    return FACING_TO_RAD[this.facing] ?? 0;
+  }
+
+  /** 현재 마우스 각도(잠금 무시, 즉시 계산) */
+  _mouseAngleRad() {
+    const pointer = this.scene.input.activePointer;
+    pointer.updateWorldPoint(this.scene.cameras.main);
+    const dx = pointer.worldX - this.x;
+    const dy = pointer.worldY - this.y;
+    return Math.atan2(dy, dx);
+  }
+
+  /** 직전 스킬 시점의 조준 각도 조회 */
+  getSkillAimAngle() {
+    return this._skillAimAngle || this._facingAngleRad();
   }
 
   /** 피격으로 인한 경직 상태 적용 */
@@ -308,6 +350,53 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
           }
       }
 
+  /** 이동과 무관한 스킬/쿨다운/HUD 틱 전용 */
+  tickSkillsAndHud() {
+    // 스킬 입력 처리
+    this._handleSkillInput();
+
+    // 에임 잠금 해제 시점 도달 체크
+    if (this._aimLocked && this.scene.time.now >= this._aimUnlockAt) {
+      this._aimLocked = false;
+    }
+
+    // 쿨다운 진행 상황 HUD로 송신
+    const now = this.scene.time.now;
+    for (const [key, endAt] of this.cooldowns) {
+      const maxMs = this.cooldownDurations.get(key) ?? 0;
+      const leftMs = Math.max(0, endAt - now);
+      const leftSec = leftMs / 1000;
+      const maxSec = maxMs / 1000;
+      this.events.emit('skill:cd', { id: key, cd: leftSec, max: maxSec });
+      if (leftMs <= 0) this.cooldowns.delete(key);
+    }
+    // 충전식 스킬 리차지 진행 및 HUD 갱신
+    for (const [key, cfg] of this.skillConfigs) {
+      if (!cfg || !cfg.charged) continue;
+      const state = this.skillChargeState.get(key) || { charges: 0, nextRechargeAt: 0 };
+      if (state.charges < (cfg.maxCharges ?? 1) && (!state.nextRechargeAt || state.nextRechargeAt <= 0)) {
+        state.nextRechargeAt = now + (cfg.rechargeMs ?? 1000);
+      }
+      if (state.nextRechargeAt && now >= state.nextRechargeAt) {
+        state.charges = Math.min((cfg.maxCharges ?? 1), (state.charges | 0) + 1);
+        if (state.charges < (cfg.maxCharges ?? 1)) {
+          state.nextRechargeAt = now + (cfg.rechargeMs ?? 1000);
+        } else {
+          state.nextRechargeAt = 0;
+        }
+      }
+      const rechargeLeftMs = (state.nextRechargeAt && state.nextRechargeAt > now) ? (state.nextRechargeAt - now) : 0;
+      this.skillChargeState.set(key, state);
+      this.events.emit('skill:charge', {
+        id: key,
+        charges: state.charges,
+        maxCharges: cfg.maxCharges,
+        rechargeLeft: (rechargeLeftMs / 1000),
+        rechargeMax: ((cfg.rechargeMs ?? 0) / 1000)
+      });
+    }
+  }
+
   _handleSkillInput() {
     const now = this.scene.time.now;
 
@@ -316,29 +405,41 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
       return;
     }
 
-    // U 스킬 키 상태 업데이트
-    if (this.skillKeys.U.isDown) {
-      this.skillKeyHeld.U = true;
-    } else {
-      this.skillKeyHeld.U = false;
+    // 스킬 시전/대시 등으로 이동 잠금 중에는 스킬 재시작 금지
+    if (this.isSkillLock) {
+      return;
     }
 
-    // I 스킬 키 상태 업데이트
-    if (this.skillKeys.I.isDown) {
-      this.skillKeyHeld.I = true;
-    } else {
-      this.skillKeyHeld.I = false;
-    }
+    // Z/X/C 키 상태 업데이트
+    this.skillKeyHeld.Z = !!this.skillKeys.Z.isDown;
+    this.skillKeyHeld.X = !!this.skillKeys.X.isDown;
+    this.skillKeyHeld.C = !!this.skillKeys.C.isDown;
 
-    // U 스킬 처리
-    if (this.skillKeyHeld.U) {
-      this._tryUseSkill('U', this.onSkillU);
-    }
+    // JustDown 판정
+    const justZ = this.skillKeyHeld.Z && !this.skillKeyPrev.Z;
+    const justX = this.skillKeyHeld.X && !this.skillKeyPrev.X;
+    const justC = this.skillKeyHeld.C && !this.skillKeyPrev.C;
 
-    // I 스킬 처리
-    if (this.skillKeyHeld.I) {
-      this._tryUseSkill('I', this.onSkillI);
-    }
+    // 스킬 처리(한 번 눌림에 1회)
+    if (justZ) this._tryUseSkill('Z', this.onSkillZ);
+    if (justX) this._tryUseSkill('X', this.onSkillX);
+    if (justC) this._tryUseSkill('C', this.onSkillC);
+
+    // 홀드 자동 재시전: 쿨이 끝나는 즉시 다시 시도
+    const tryAutoHold = (key, handler) => {
+      const cfg = this.skillConfigs.get(key);
+      if (cfg && cfg.autoHold && this.skillKeyHeld[key]) {
+        this._tryUseSkill(key, handler);
+      }
+    };
+    tryAutoHold('Z', this.onSkillZ);
+    tryAutoHold('X', this.onSkillX);
+    tryAutoHold('C', this.onSkillC);
+
+    // prev 업데이트
+    this.skillKeyPrev.Z = this.skillKeyHeld.Z;
+    this.skillKeyPrev.X = this.skillKeyHeld.X;
+    this.skillKeyPrev.C = this.skillKeyHeld.C;
   }
 
   /** 스킬 사용 시도(쿨다운/충전 규칙 적용) */
@@ -347,9 +448,16 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
     const cfg = this.skillConfigs.get(key);
     const next = this.cooldowns.get(key) ?? 0;
 
+    // 잠금 중에는 시도하지 않음(이중 안전장치)
+    if (this.isSkillLock || this.isStaggered) return;
+
     if (cfg && cfg.charged) {
       const state = this.skillChargeState.get(key) || { charges: 0, nextRechargeAt: 0 };
       if (now >= next && state.charges > 0 && typeof cb === 'function') {
+        // 공통 에임 각도 스냅샷
+        this._skillAimAngle = (cfg.mouseAim ? this._mouseAngleRad() : this._facingAngleRad());
+        // 공통 에임 잠금 처리(옵션)
+        if (cfg.aimLock) this.lockAimFor(cfg.aimLockMs ?? 200);
         const useCd = cfg.useCooldownMs ?? 0;
         if (useCd > 0) this.setCooldown(key, useCd); else this.beginAttackSession(key);
         cb.call(this);
@@ -368,6 +476,13 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
 
     // 일반 스킬: 기존 규칙 유지(스킬 내부에서 setCooldown 호출 기대)
     if (now >= next && typeof cb === 'function') {
+      // 공통 에임 각도 스냅샷
+      if (cfg) {
+        this._skillAimAngle = (cfg.mouseAim ? this._mouseAngleRad() : this._facingAngleRad());
+        if (cfg.aimLock) this.lockAimFor(cfg.aimLockMs ?? 200);
+      } else {
+        this._skillAimAngle = this._facingAngleRad();
+      }
       cb.call(this);
     }
   }
@@ -392,14 +507,19 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
 
   /** 스킬 바인딩 및 메타 설정(충전식 여부 등) */
   bindSkill(key, callback, config = {}) {
-    if (key === 'U') this.onSkillU = callback;
-    else if (key === 'I') this.onSkillI = callback;
+    if (key === 'Z') this.onSkillZ = callback;
+    else if (key === 'X') this.onSkillX = callback;
+    else if (key === 'C') this.onSkillC = callback;
 
     const cfg = {
       charged: !!config.charged,
       maxCharges: Math.max(1, config.maxCharges ?? 1),
       rechargeMs: config.rechargeMs ?? 0,
       useCooldownMs: config.useCooldownMs ?? 0,
+      mouseAim: !!config.mouseAim,
+      aimLock: !!config.aimLock,
+      aimLockMs: config.aimLockMs ?? 0,
+      autoHold: config.autoHold ?? true,
     };
     this.skillConfigs.set(key, cfg);
 

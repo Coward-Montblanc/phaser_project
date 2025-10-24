@@ -17,8 +17,9 @@ export default class Player1 extends Player {
     this.dashGroup = scene.physics.add.group({ allowGravity: false, immovable: true });
 
     // 스킬 구현 바인딩
-    this.onSkillU = () => this._skillSlash180();
-    this.onSkillI = () => this._skillDashHit();
+    this.bindSkill('Z', () => this._skillSlash180(), { mouseAim: true, aimLock: true, aimLockMs: 120 });
+    this.bindSkill('X', () => this._skillDashHit(), { mouseAim: true, aimLock: true, aimLockMs: 150 });
+    // C는 미구현: 바인딩만 가능하도록 비워둠
 
     // === 캐릭터 고유 스탯 ===
     this.maxHp = 30;
@@ -58,8 +59,8 @@ export default class Player1 extends Player {
     const RINGS    = 3;
     const DOTS_PER_RING = 10;
     const SWEEP    = Math.PI; // 180도
-    const baseAngle = this._facingAngleRad();
-    this.setCooldown('U', COOLDOWN);
+    const baseAngle = this.getSkillAimAngle();
+    this.setCooldown('Z', COOLDOWN);
     this.lockMovement(LIFETIME);
     // 세션 종료 예약
     this.scene.time.delayedCall(LIFETIME + 60, () => this.endAttackSession('U'));
@@ -112,7 +113,7 @@ export default class Player1 extends Player {
   /** 전방 대시 */
   _skillDashHit() {
     // 캐릭터 고유 쿨타임
-    this.setCooldown('I', this.DASH_COOLDOWN_MS);
+    this.setCooldown('X', this.DASH_COOLDOWN_MS);
     runDash(this, {
         distance: 100,
         speed: 900,
@@ -137,6 +138,8 @@ export default class Player1 extends Player {
           color: 0xC50058,
           alpha: 0.35,
         },
+        angleRad: this.getSkillAimAngle(),
+        skillKey: 'X',
       });
   }  
   

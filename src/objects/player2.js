@@ -17,13 +17,17 @@ export default class Player2 extends Player {
     this.dashGroup = scene.physics.add.group({ allowGravity: false, immovable: true });
 
     // 스킬 구현 바인딩 (I는 충전식)
-    this.bindSkill('U', () => this._skillSlash180());
-    this.bindSkill('I', () => this._skillDashHit(), {
+    this.bindSkill('Z', () => this._skillSlash180(), { mouseAim: true, aimLock: true, aimLockMs: 80 });
+    this.bindSkill('X', () => this._skillDashHit(), {
       charged: true,
       maxCharges: 3,
       rechargeMs: 3000,     // 충전시간 3초
-      useCooldownMs: 500   // 재사용대기시간 1초
+      useCooldownMs: 500,   // 재사용대기시간 1초
+      mouseAim: true,
+      aimLock: true,
+      aimLockMs: 120
     });
+    // C는 미구현: 바인딩만 가능하도록 비워둠
 
     // === 캐릭터 고유 스탯 ===
     this.maxHp = 25;
@@ -64,7 +68,7 @@ export default class Player2 extends Player {
     const LIFETIME = 50;    // 각 베기 지속시간
     const RADIUS = 35;       // 베기 반경
     const SWEEP = Math.PI;   // 180도
-    const baseAngle = this._facingAngleRad();
+    const baseAngle = this.getSkillAimAngle();
     
     this.setCooldown('U', COOLDOWN);
     this.lockMovement(SLASH_COUNT * SLASH_INTERVAL + 200); // 전체 스킬 지속시간 동안 이동 잠금
@@ -148,7 +152,9 @@ export default class Player2 extends Player {
           // spriteKey: 'dashBeam',       // 나중에 스프라이트 쓰고 싶으면 키 전달
           color: 0x00C5FF,  // player2는 파란색 계열
           alpha: 0.35,
-        }
+        },
+        angleRad: this.getSkillAimAngle(),
+        skillKey: 'X'
       });
   }  
   

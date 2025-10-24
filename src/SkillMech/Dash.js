@@ -54,13 +54,15 @@ export function runDash(owner, opts) {
       },
       onHit: opts.onHit,
       onComplete: opts.onComplete,
+      skillKey: opts.skillKey || 'X',
     };
   
     // 시작점/방향
     const sx = owner.x, sy = owner.y;
-    const facingToRad = owner._facingAngleRad ? owner._facingAngleRad() :
-      ({ right:0, 'down-right':Math.PI/4, down:Math.PI/2, 'down-left':3*Math.PI/4, left:Math.PI, 'up-left':-3*Math.PI/4, up:-Math.PI/2, 'up-right':-Math.PI/4 }[owner.facing] ?? 0);
-    const dirX = Math.cos(facingToRad), dirY = Math.sin(facingToRad);
+    const useAngle = (typeof opts.angleRad === 'number') ? opts.angleRad : (
+      owner._facingAngleRad ? owner._facingAngleRad() : ({ right:0, 'down-right':Math.PI/4, down:Math.PI/2, 'down-left':3*Math.PI/4, left:Math.PI, 'up-left':-3*Math.PI/4, up:-Math.PI/2, 'up-right':-Math.PI/4 }[owner.facing] ?? 0)
+    );
+    const dirX = Math.cos(useAngle), dirY = Math.sin(useAngle);
     const stepPx = (scene?.map?.tileWidth || 16) / 3;
     const layer  = cfg.wall.layer;
   
@@ -111,7 +113,7 @@ export function runDash(owner, opts) {
     // 오버랩 연결은 게임씬에서 targets와 맺어주는 것을 권장 (모듈은 생성만)
   
     // 한 번의 대시 전체를 하나의 세션 ID로 고정 → 타겟당 1회만 히트
-    const dashSkillId = (owner.getAttackSegmentId ? owner.getAttackSegmentId('I', 0) : `I-${scene.time.now}`);
+    const dashSkillId = (owner.getAttackSegmentId ? owner.getAttackSegmentId(cfg.skillKey, 0) : `${cfg.skillKey}-${scene.time.now}`);
     const spawnHit = (x, y) => {
       const dot = hitGroup.create(x, y, owner.HIT_TEX);
       dot.setOrigin(0.5).setVisible(false);
@@ -221,7 +223,7 @@ export function runDash(owner, opts) {
             cfg.onComplete();
           }
           // 공격 세션 종료(세션 프리픽스 메모리 청소)
-          if (owner.endAttackSession) owner.endAttackSession('I');
+          if (owner.endAttackSession) owner.endAttackSession(cfg.skillKey);
         }
       });
     };

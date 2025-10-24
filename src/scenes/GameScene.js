@@ -3,6 +3,8 @@ import Player2 from '../objects/player2.js';
 import HUD from "../ui/HUD.js";
 import { TeleportManager } from '../services/teleport.js';
 import { GAME } from '../constants.js';
+import { Pathfinder } from '../services/pathfinding.js';
+import { MovementController } from '../services/movement.js';
 
 export default class GameScene extends Phaser.Scene {
   constructor() {
@@ -64,13 +66,10 @@ export default class GameScene extends Phaser.Scene {
     // --- 카메라 ---
     this.cameras.main.startFollow(this.player, true, 0.15, 0.15);
 
-    // --- 입력 ---
-    this.keys = this.input.keyboard.addKeys({
-      W: Phaser.Input.Keyboard.KeyCodes.W,
-      A: Phaser.Input.Keyboard.KeyCodes.A,
-      S: Phaser.Input.Keyboard.KeyCodes.S,
-      D: Phaser.Input.Keyboard.KeyCodes.D,
-    });
+    // --- 입력(우클릭 이동 전용으로 변경) ---
+    this.input.mouse?.disableContextMenu();
+    const reloadBtn = document.getElementById('reloadBtn');
+    if (reloadBtn) reloadBtn.onclick = () => this.scene.restart();
 
     // --- 타겟 그룹(피격 대상) ---
     this.targets = this.physics.add.group();
@@ -157,139 +156,30 @@ export default class GameScene extends Phaser.Scene {
     ];
     this.tp = new TeleportManager(this, tpRules, wallLayer);
 
-    // --- UI / 모드 전환 ---
-    this.mode = 'free';                      // 'free' | 'grid'
-    this.inputQueue = [];
-    this.hold = { dir: null, timer: 0 };
+    // --- 경로탐색/이동 컨트롤러 ---
+    // 길찾기는 통로 폭을 제한하지 않도록 팽창은 제거 (clearanceTiles=0)
+    this.pathfinder = new Pathfinder(wallLayer, (tx, ty) => this.isWalkable(tx, ty), { clearanceTiles: 0 });
+    this.movement = new MovementController(this, this.player, wallLayer, this.pathfinder);
 
-    const modeBtn = document.getElementById('modeBtn');
-    const reloadBtn = document.getElementById('reloadBtn');
-    const applyModeText = () => modeBtn.textContent = `격자 이동: ${this.mode === 'grid' ? 'ON' : 'OFF'}`;
-    applyModeText();
-
-    reloadBtn.onclick = () => this.scene.restart();
-    modeBtn.onclick = () => {
-      if (this.mode === 'free') {
-        // 자유→격자
-        this.mode = 'grid';
-        const tx = wallLayer.worldToTileX(this.player.x);
-        const ty = wallLayer.worldToTileY(this.player.y);
-        this.grid.tx = Phaser.Math.Clamp(tx, 0, map.width - 1);
-        this.grid.ty = Phaser.Math.Clamp(ty, 0, map.height - 1);
-        this.player.snapToTile(this.grid.tx, this.grid.ty);
-        this.wallCollider.active = false;
-        this.hold.dir = null; this.hold.timer = 0; this.inputQueue.length = 0;
-      } else {
-        // 격자→자유
-        this.mode = 'free';
-        this.tweens.killTweensOf(this.player);
-        this.grid.moving = false;
-        this.inputQueue.length = 0;
-        this.hold.dir = null; this.hold.timer = 0;
-        this.wallCollider.active = true;
+    // 우클릭 시 경로 설정 (기존 경로는 덮어씀)
+    this.input.on('pointerdown', (pointer) => {
+      if (pointer.rightButtonDown()) {
+        this.movement.setDestinationWorld(pointer.worldX, pointer.worldY);
       }
-      applyModeText();
-    };
-
-    // --- 격자 이동 디큐 ---
-    this._dequeueMove = () => {
-      if (this.grid.moving || this.inputQueue.length === 0) return;
-
-      const { dx, dy, dir } = this.inputQueue.shift();
-
-      // 이동 직전 텔레포트 체크
-      if (this.tp.tryFromGrid(dir, this)) {
-        // 텔레포트했다면 다음 입력 즉시 체크
-        this._dequeueMove();
-        return;
-      }
-
-      const nx = this.grid.tx + dx;
-      const ny = this.grid.ty + dy;
-      if (!this.isWalkable(nx, ny)) {
-        this._dequeueMove();
-        return;
-      }
-
-      this.grid.moving = true;
-      this.wallCollider.active = false;
-
-      // 바라보는 방향/애니메이션
-      this.facing = dir; this.player.facing = dir; this.player.playWalk();
-
-      this.tweens.add({
-        targets: this.player,
-        x: this.toWorld(nx),
-        y: this.toWorld(ny),
-        duration: GAME.MOVE_DURATION,
-        ease: 'Linear',
-        onComplete: () => {
-          this.grid.tx = nx; this.grid.ty = ny;
-          this.grid.moving = false;
-          if (this.mode === 'free') this.wallCollider.active = true;
-          this.player.playIdle();
-          this._dequeueMove();
-        }
-      });
-    };
+    });
   }
 
   update(time, delta) {
-    if (!this.keys) return;
-
-    // stagger 상태일 때는 이동과 스킬 사용 불가
-    if (this.player.isStaggered) {
-      return;
+    // 클릭 이동 업데이트 + 스킬 입력/쿨다운 틱
+    this.movement.update(delta);
+    if (this.player && typeof this.player.tickSkillsAndHud === 'function') {
+      this.player.tickSkillsAndHud();
     }
 
-    if (this.mode === 'grid') {
-      // 홀드 입력 읽기
-      let wantDir = null;
-      if (this.keys.W.isDown) wantDir = 'up';
-      else if (this.keys.S.isDown) wantDir = 'down';
-      else if (this.keys.A.isDown) wantDir = 'left';
-      else if (this.keys.D.isDown) wantDir = 'right';
-
-      if (!wantDir) { this.hold.dir = null; this.hold.timer = 0; return; }
-
-      if (this.hold.dir !== wantDir) {
-        this.hold.dir = wantDir;
-        this.hold.timer = 0; // 즉시 1칸
-      }
-
-      this.hold.timer -= delta;
-      if (this.hold.timer > 0) return;
-      if (this.grid.moving) { this.hold.timer = 16; return; }
-
-      // 텔레포트는 _dequeueMove 안에서도 다시 체크되지만
-      // 입력 직후 우선 체크하여 부드럽게
-      if (this.tp.tryFromGrid(this.hold.dir, this)) {
-        this.hold.timer = 80;
+    // 텔레포트 (이동/스킬 처리 후 체크)
+    if (this.player.facing) {
+      if (this.tp.tryFromFree(this.player.facing, this)) {
         return;
-      }
-
-      let dx=0, dy=0;
-      switch (this.hold.dir) {
-        case 'up': dy = -1; break;
-        case 'down': dy = 1; break;
-        case 'left': dx = -1; break;
-        case 'right': dx = 1; break;
-      }
-      this.inputQueue.push({ dx, dy, dir: this.hold.dir });
-      if (!this.grid.moving) this._dequeueMove();
-      this.hold.timer = GAME.HOLD_REPEAT_DELAY;
-
-    } else {
-      // 자유 이동
-      this.wallCollider.active = true;
-      // 이동/애니메이션
-      this.player.updateFree(this.keys);
-
-      // 텔레포트
-      if (this.player.facing) {
-        if (this.tp.tryFromFree(this.player.facing, this)) {
-          return; // 텔레포트했으면 이번 프레임 종료
-        }
       }
     }
   }
