@@ -48,7 +48,7 @@ export default class CharacterSelect extends Phaser.Scene {
     this.placeCharacter(1, 0, 'player2');
 
     // 조작 안내
-    this.add.text(this.cameras.main.centerX, this.cameras.main.height - 50, 'WASD: 이동, U: 선택', {
+    this.add.text(this.cameras.main.centerX, this.cameras.main.height - 50, '좌클릭: 캐릭터 고르기 · Z/X/C: 선택', {
       fontSize: '14px',
       fill: '#888888',
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
@@ -56,11 +56,24 @@ export default class CharacterSelect extends Phaser.Scene {
 
     // 키 입력 설정
     this.keys = this.input.keyboard.addKeys({
-      W: Phaser.Input.Keyboard.KeyCodes.W,
-      A: Phaser.Input.Keyboard.KeyCodes.A,
-      S: Phaser.Input.Keyboard.KeyCodes.S,
-      D: Phaser.Input.Keyboard.KeyCodes.D,
-      U: Phaser.Input.Keyboard.KeyCodes.U
+      Z: Phaser.Input.Keyboard.KeyCodes.Z,
+      X: Phaser.Input.Keyboard.KeyCodes.X,
+      C: Phaser.Input.Keyboard.KeyCodes.C
+    });
+
+    // 마우스 좌클릭으로 선택 칸 이동
+    this.input.on('pointerdown', (pointer) => {
+      if (!pointer.leftButtonDown()) return;
+      pointer.updateWorldPoint(this.cameras.main);
+      const wx = pointer.worldX;
+      const wy = pointer.worldY;
+      const gx = Math.floor((wx - this.startX) / this.cellSize);
+      const gy = Math.floor((wy - this.startY) / this.cellSize);
+      if (gx >= 0 && gy >= 0 && gx < this.gridWidth && gy < this.gridHeight) {
+        this.selectedX = gx;
+        this.selectedY = gy;
+        this.updateSelectionIndicator();
+      }
     });
   }
 
@@ -107,36 +120,27 @@ export default class CharacterSelect extends Phaser.Scene {
   update() {
     if (!this.keys) return;
 
-    // 이동 입력 처리
-    if (Phaser.Input.Keyboard.JustDown(this.keys.W) && this.selectedY > 0) {
-      this.selectedY--;
-      this.updateSelectionIndicator();
-    }
-    if (Phaser.Input.Keyboard.JustDown(this.keys.S) && this.selectedY < this.gridHeight - 1) {
-      this.selectedY++;
-      this.updateSelectionIndicator();
-    }
-    if (Phaser.Input.Keyboard.JustDown(this.keys.A) && this.selectedX > 0) {
-      this.selectedX--;
-      this.updateSelectionIndicator();
-    }
-    if (Phaser.Input.Keyboard.JustDown(this.keys.D) && this.selectedX < this.gridWidth - 1) {
-      this.selectedX++;
-      this.updateSelectionIndicator();
-    }
+    // WASD 이동 제거 (좌클릭으로만 이동)
 
-    // 선택 입력 처리
-    if (Phaser.Input.Keyboard.JustDown(this.keys.U)) {
-      // player1 선택 (0, 0)
-      if (this.selectedX === 0 && this.selectedY === 0) {
-        this.registry.set('selectedCharacter', 'player1');
-        this.scene.start('GameScene');
-      }
-      // player2 선택 (1, 0)
-      else if (this.selectedX === 1 && this.selectedY === 0) {
-        this.registry.set('selectedCharacter', 'player2');
-        this.scene.start('GameScene');
-      }
+    // 선택 입력 처리 (Z/X/C 또는 커서 위치 기준 선택)
+    if (Phaser.Input.Keyboard.JustDown(this.keys.Z)) {
+      // 기본 player1 슬롯(0,0)
+      this.selectedX = 0; this.selectedY = 0; this.updateSelectionIndicator();
+      this.registry.set('selectedCharacter', 'player1');
+      this.scene.start('GameScene');
+    }
+    if (Phaser.Input.Keyboard.JustDown(this.keys.X)) {
+      // 기본 player2 슬롯(1,0)
+      this.selectedX = 1; this.selectedY = 0; this.updateSelectionIndicator();
+      this.registry.set('selectedCharacter', 'player2');
+      this.scene.start('GameScene');
+    }
+    if (Phaser.Input.Keyboard.JustDown(this.keys.C)) {
+      // 커서 위치의 캐릭터를 선택(없으면 player1)
+      let chosen = 'player1';
+      if (this.selectedX === 1 && this.selectedY === 0) chosen = 'player2';
+      this.registry.set('selectedCharacter', chosen);
+      this.scene.start('GameScene');
     }
   }
 }
