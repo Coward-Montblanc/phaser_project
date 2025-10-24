@@ -8,7 +8,10 @@
  * @param {number} opts.distance   // 이동거리(px)
  * @param {number} opts.speed      // 속도(px/s)
  * @param {number} [opts.damage=0] // 히트박스에 실릴 데미지
+ * @param {number} [opts.staggerTime=0] // 히트박스에 실릴 스턴 시간 (밀리초)
  * @param {number} [opts.width=12] // 이펙트 두께(px)
+ * @param {boolean} [opts.attack=true] // 대시 공격 여부 (true: 히트판정 생성, false: 이펙트만)
+ * @param {boolean} [opts.invincible=false] // 대시 중 무적 여부 (true: 피해 무시, false: 피해 받음)
  * @param {{layer?:Phaser.Tilemaps.TilemapLayer, mode:'always'|'block_landing'|'block_all', pad?:number}} [opts.wall]
  *   - always: 벽 무시하고 이동
  *   - block_landing: 목적지가 벽이면 마지막 빈칸까지만, 아니면 관통
@@ -30,6 +33,9 @@ export function runDash(owner, opts) {
       speed: opts.speed ?? 900,
       width: opts.width ?? 12,
       damage: opts.damage ?? 0,
+      staggerTime: opts.staggerTime ?? 0, // 스턴 시간
+      attack: opts.attack ?? true, // 대시 공격 여부
+      invincible: opts.invincible ?? false, // 대시 중 무적 여부
       wall: {
         layer: opts.wall?.layer ?? owner.wallLayer ?? scene?.wallLayer ?? null,
         mode: opts.wall?.mode ?? 'block_landing',
@@ -47,6 +53,7 @@ export function runDash(owner, opts) {
         spriteKey: opts.effect?.spriteKey ?? null,
       },
       onHit: opts.onHit,
+      onComplete: opts.onComplete,
     };
   
     // 시작점/방향
@@ -85,24 +92,33 @@ export function runDash(owner, opts) {
     // 상태 플래그
     owner.isDashing = true;
     owner.isSkillLock = true;
+    
+    // 무적 상태 설정
+    if (cfg.invincible) {
+      owner.isInvincible = true;
+    }
   
     // 이펙트 준비
     const g = (!cfg.effect.spriteKey) ? scene.add.graphics().setDepth(9) : null;
     const width = cfg.width;
     const color = cfg.effect.color, alpha = cfg.effect.alpha;
   
-    // 히트 그룹 준비
+    // 히트 그룹 준비 (공격 옵션이 true일 때만)
     let hitGroup = cfg.hit.group;
-    if (!hitGroup && cfg.hit.enabled) {
+    if (!hitGroup && cfg.hit.enabled && cfg.attack) {
       hitGroup = scene.physics.add.group({ allowGravity: false, immovable: true });
     }
     // 오버랩 연결은 게임씬에서 targets와 맺어주는 것을 권장 (모듈은 생성만)
   
+    // 한 번의 대시 전체를 하나의 세션 ID로 고정 → 타겟당 1회만 히트
+    const dashSkillId = (owner.getAttackSegmentId ? owner.getAttackSegmentId('I', 0) : `I-${scene.time.now}`);
     const spawnHit = (x, y) => {
       const dot = hitGroup.create(x, y, owner.HIT_TEX);
       dot.setOrigin(0.5).setVisible(false);
       dot.owner = owner;
       dot.damage = cfg.damage;     // ⬅️ 대미지 실어보내기
+      dot.staggerTime = cfg.staggerTime || 0; // ⬅️ 스턴 시간 실어보내기
+      dot.skillId = dashSkillId;
       dot.body.setAllowGravity(false);
       dot.body.setImmovable(true);
       dot.body.setCircle(cfg.hit.radius, 0, 0);
@@ -140,8 +156,8 @@ export function runDash(owner, opts) {
         }
         // TODO: spriteKey 이펙트가 필요해지면 여기서 스케일/회전으로 늘려 붙이면 됨.
   
-        // 히트 샘플
-        if (cfg.hit.enabled && hitGroup) {
+        // 히트 샘플 (공격 옵션이 true일 때만)
+        if (cfg.hit.enabled && cfg.attack && hitGroup) {
           const res = _lineSpawnAlong(sx, sy, nx, ny, cfg.hit.step,
             (px, py) => samples.push(spawnHit(px, py)), lastSpawn);
           lastSpawn = res.last;
@@ -156,6 +172,11 @@ export function runDash(owner, opts) {
       owner.isDashing = false;
       growEvt.remove(false);
       owner.isSkillLock = false;
+      
+      // 무적 상태 해제
+      if (cfg.invincible) {
+        owner.isInvincible = false;
+      }
   
       if (collider) collider.active = true;
   
@@ -195,6 +216,12 @@ export function runDash(owner, opts) {
           g && g.destroy();
           samples.forEach(s => s.destroy());
           samples.length = 0;
+          // 사용자 콜백 호출
+          if (cfg.onComplete) {
+            cfg.onComplete();
+          }
+          // 공격 세션 종료(세션 프리픽스 메모리 청소)
+          if (owner.endAttackSession) owner.endAttackSession('I');
         }
       });
     };

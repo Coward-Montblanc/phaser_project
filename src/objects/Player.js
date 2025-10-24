@@ -42,6 +42,18 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
     this.cooldowns = new Map(); // ex) this.cooldowns.set('U', nextUsableTimeMs)
     this.cooldownDurations = new Map();
     this.isSkillLock = false; // 스킬 시전 중 이동 불가
+    this.isStaggered = false; // 피격으로 인한 경직 상태
+    this.lastHitBySkill = {}; // (deprecated) 호환용
+    this.hitProcessed = new Set(); // 중복 히트 방지용: 처리된 attackId 집합
+    this.attackSeqByKey = new Map(); // 스킬 키별 세션 시퀀스
+    this.currentAttackSession = new Map(); // 스킬 키별 현재 세션 ID
+    this.skillKeyHeld = { U: false, I: false }; // 각 스킬 키의 홀드 상태 추적
+    this.skillStaggerTimes = {}; // 각 스킬별 기절 시간 (밀리초)
+    this.staggerTimer = null; // 기절 타이머 참조
+    this.staggerTextCount = 0; // 현재 표시 중인 기절 텍스트 개수
+    // 스킬 메타/충전 상태
+    this.skillConfigs = new Map(); // key -> { charged, maxCharges, rechargeMs, useCooldownMs }
+    this.skillChargeState = new Map(); // key -> { charges, nextRechargeAt }
     // HP(캐릭터 파일에서 덮어쓰기 권장)
     this.maxHp = 1;
     this.hp = this.maxHp;
@@ -68,6 +80,118 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
     this.scene.time.delayedCall(ms, () => {
       this.isSkillLock = false;
     });
+  }
+
+  /** 피격으로 인한 경직 상태 적용 */
+  applyStagger(duration = 1000) {
+    this.isStaggered = true;
+    this.setVelocity(0, 0); // 즉시 멈춤
+    
+    // 기절 텍스트 효과 생성 (중첩시에도 개별 텍스트)
+    this._createStaggerText(duration);
+    
+    // 기존 기절 타이머가 있다면 취소하고 새로운 타이머 설정
+    if (this.staggerTimer) {
+      this.staggerTimer.remove();
+    }
+    
+    this.staggerTimer = this.scene.time.delayedCall(duration, () => {
+      this.isStaggered = false;
+      this.staggerTimer = null;
+    });
+  }
+
+  /** 기절 텍스트 효과 생성 */
+  _createStaggerText(duration) {
+    const scene = this.scene;
+    
+    // 현재 표시 중인 기절 텍스트 개수에 따라 위치 조정
+    const offsetY = this.staggerTextCount * 15; // 각 텍스트마다 15px 간격
+    const startY = this.y - this.height / 2 - 10 - offsetY; // 체력바 위쪽에서 시작
+    
+    const staggerText = scene.add.text(this.x, startY, '기절', {
+      fontSize: '16px',  // 더 크게
+      fill: '#ff0000',   // 더 밝은 빨간색
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+      stroke: '#ffffff', // 흰색 테두리로 더 눈에 띄게
+      strokeThickness: 3
+    }).setOrigin(0.5, 0.5).setDepth(20); // HUD보다 높은 depth
+    
+    // 텍스트 개수 증가
+    this.staggerTextCount++;
+    
+    // 텍스트가 위로 올라가는 애니메이션
+    scene.tweens.add({
+      targets: staggerText,
+      y: startY - 2, // 30px 위로 이동
+      alpha: 0,      // 서서히 투명해짐
+      duration: duration,
+      ease: 'Power2.easeOut',
+      onComplete: () => {
+        staggerText.destroy();
+        this.staggerTextCount--; // 텍스트 개수 감소
+      }
+    });
+  }
+
+  /** 스킬별 기절 시간 설정 */
+  setSkillStaggerTime(skillKey, durationMs) {
+    this.skillStaggerTimes[skillKey] = durationMs;
+  }
+
+  /** 스킬 히트 기록 초기화 */
+  clearSkillHitRecord(skillKey) {
+    if (!skillKey) return;
+    // 구세대 방식 호환
+    this.lastHitBySkill[skillKey] = null;
+    // 세션/중복 히트 기록 클린업(프리픽스 매칭)
+    const session = this.currentAttackSession.get(skillKey);
+    if (session) {
+      const prefix = `${session}`;
+      for (const id of Array.from(this.hitProcessed)) {
+        if (id && typeof id === 'string' && id.startsWith(prefix)) this.hitProcessed.delete(id);
+      }
+    }
+  }
+
+  /** 스킬 ID로 기절 시간 가져오기 */
+  getStaggerTimeBySkillId(skillId) {
+    if (!skillId) return 0;
+    
+    // 스킬 ID에서 스킬 키 추출 (예: U_1 -> U, U-123-seg0 -> U)
+    const skillKey = (skillId.split(/[_-]/)[0]) || null;
+    const staggerTime = this.skillStaggerTimes[skillKey] || 0;
+    return staggerTime;
+  }
+
+  /** 공격 세션 시작: 한 번의 스킬 사용 단위 */
+  beginAttackSession(skillKey) {
+    const prev = this.attackSeqByKey.get(skillKey) || 0;
+    const next = prev + 1;
+    this.attackSeqByKey.set(skillKey, next);
+    const session = `${skillKey}-${next}-${(this.scene?.time?.now|0)}`;
+    this.currentAttackSession.set(skillKey, session);
+    return session;
+  }
+
+  /** 공격 세션 내부의 세그먼트 ID(동일 세그먼트는 중복 히트 1회로 제한) */
+  getAttackSegmentId(skillKey, segmentIndex = 0) {
+    const session = this.currentAttackSession.get(skillKey);
+    if (session) return `${session}-seg${segmentIndex|0}`;
+    // 세션이 없을 때도 안전하게 고유 ID 발급
+    return `${skillKey}-adhoc-${(this.scene?.time?.now|0)}-seg${segmentIndex|0}`;
+  }
+
+  /** 공격 세션 종료: 세션 프리픽스의 기록 정리(메모리 청소 목적) */
+  endAttackSession(skillKey) {
+    const session = this.currentAttackSession.get(skillKey);
+    if (session) {
+      const prefix = `${session}`;
+      for (const id of Array.from(this.hitProcessed)) {
+        if (id && typeof id === 'string' && id.startsWith(prefix)) this.hitProcessed.delete(id);
+      }
+    }
+    this.currentAttackSession.delete(skillKey);
   }
 
   static _animsCreated = {};
@@ -155,20 +279,96 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
             this.events.emit('skill:cd', { id: key, cd: leftSec, max: maxSec });
             if (leftMs <= 0) this.cooldowns.delete(key);
           }
+          // --- 충전식 스킬 리차지 진행 및 HUD 갱신 ---
+          for (const [key, cfg] of this.skillConfigs) {
+            if (!cfg || !cfg.charged) continue;
+            const state = this.skillChargeState.get(key) || { charges: 0, nextRechargeAt: 0 };
+            // 리차지 스케줄이 없고 미만이면 스케줄 시작
+            if (state.charges < (cfg.maxCharges ?? 1) && (!state.nextRechargeAt || state.nextRechargeAt <= 0)) {
+              state.nextRechargeAt = now + (cfg.rechargeMs ?? 1000);
+            }
+            // 리차지 도착 처리
+            if (state.nextRechargeAt && now >= state.nextRechargeAt) {
+              state.charges = Math.min((cfg.maxCharges ?? 1), (state.charges | 0) + 1);
+              if (state.charges < (cfg.maxCharges ?? 1)) {
+                state.nextRechargeAt = now + (cfg.rechargeMs ?? 1000);
+              } else {
+                state.nextRechargeAt = 0;
+              }
+            }
+            const rechargeLeftMs = (state.nextRechargeAt && state.nextRechargeAt > now) ? (state.nextRechargeAt - now) : 0;
+            this.skillChargeState.set(key, state);
+            this.events.emit('skill:charge', {
+              id: key,
+              charges: state.charges,
+              maxCharges: cfg.maxCharges,
+              rechargeLeft: (rechargeLeftMs / 1000),
+              rechargeMax: ((cfg.rechargeMs ?? 0) / 1000)
+            });
+          }
       }
 
   _handleSkillInput() {
     const now = this.scene.time.now;
 
-    // U 스킬
-    if (Phaser.Input.Keyboard.JustDown(this.skillKeys.U)) {
-      const next = this.cooldowns.get('U') ?? 0;
-      if (now >= next && this.onSkillU) this.onSkillU();
+    // stagger 상태일 때는 스킬 사용 불가
+    if (this.isStaggered) {
+      return;
     }
-    // I 스킬
-    if (Phaser.Input.Keyboard.JustDown(this.skillKeys.I)) {
-      const next = this.cooldowns.get('I') ?? 0;
-      if (now >= next && this.onSkillI) this.onSkillI();
+
+    // U 스킬 키 상태 업데이트
+    if (this.skillKeys.U.isDown) {
+      this.skillKeyHeld.U = true;
+    } else {
+      this.skillKeyHeld.U = false;
+    }
+
+    // I 스킬 키 상태 업데이트
+    if (this.skillKeys.I.isDown) {
+      this.skillKeyHeld.I = true;
+    } else {
+      this.skillKeyHeld.I = false;
+    }
+
+    // U 스킬 처리
+    if (this.skillKeyHeld.U) {
+      this._tryUseSkill('U', this.onSkillU);
+    }
+
+    // I 스킬 처리
+    if (this.skillKeyHeld.I) {
+      this._tryUseSkill('I', this.onSkillI);
+    }
+  }
+
+  /** 스킬 사용 시도(쿨다운/충전 규칙 적용) */
+  _tryUseSkill(key, cb) {
+    const now = this.scene.time.now;
+    const cfg = this.skillConfigs.get(key);
+    const next = this.cooldowns.get(key) ?? 0;
+
+    if (cfg && cfg.charged) {
+      const state = this.skillChargeState.get(key) || { charges: 0, nextRechargeAt: 0 };
+      if (now >= next && state.charges > 0 && typeof cb === 'function') {
+        const useCd = cfg.useCooldownMs ?? 0;
+        if (useCd > 0) this.setCooldown(key, useCd); else this.beginAttackSession(key);
+        cb.call(this);
+        state.charges = Math.max(0, (state.charges | 0) - 1);
+        if (state.charges < (cfg.maxCharges ?? 1)) {
+          const now2 = this.scene.time.now;
+          const nextAt = state.nextRechargeAt && state.nextRechargeAt > now2 ? state.nextRechargeAt : (now2 + (cfg.rechargeMs ?? 1000));
+          state.nextRechargeAt = nextAt;
+        } else {
+          state.nextRechargeAt = 0;
+        }
+        this.skillChargeState.set(key, state);
+      }
+      return;
+    }
+
+    // 일반 스킬: 기존 규칙 유지(스킬 내부에서 setCooldown 호출 기대)
+    if (now >= next && typeof cb === 'function') {
+      cb.call(this);
     }
   }
 
@@ -176,6 +376,12 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
     const now = this.scene.time.now;
     this.cooldowns.set(key, now + msFromNow);
     this.cooldownDurations.set(key, msFromNow);
+    
+    // 새로운 공격 세션 시작(한 번의 스킬 사용 단위)
+    this.beginAttackSession(key);
+    // 구세대 기록 초기화(혹시 남아있을 수 있는 키 제거)
+    this.lastHitBySkill[key] = null;
+    
     // HUD가 바로 가려지도록 즉시 1회 알림(초 단위)
     this.events.emit('skill:cd', {
       id: key,
@@ -184,16 +390,74 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
     });
   }
 
-  // ===== HP/피해 처리 =====
-    takeDamage(n = 0) {
+  /** 스킬 바인딩 및 메타 설정(충전식 여부 등) */
+  bindSkill(key, callback, config = {}) {
+    if (key === 'U') this.onSkillU = callback;
+    else if (key === 'I') this.onSkillI = callback;
+
+    const cfg = {
+      charged: !!config.charged,
+      maxCharges: Math.max(1, config.maxCharges ?? 1),
+      rechargeMs: config.rechargeMs ?? 0,
+      useCooldownMs: config.useCooldownMs ?? 0,
+    };
+    this.skillConfigs.set(key, cfg);
+
+    if (cfg.charged) {
+      // 초기 상태: 풀충전
+      this.skillChargeState.set(key, { charges: cfg.maxCharges, nextRechargeAt: 0 });
+      // HUD에 즉시 알림
+      this.events.emit('skill:charge', {
+        id: key,
+        charges: cfg.maxCharges,
+        maxCharges: cfg.maxCharges,
+        rechargeLeft: 0,
+        rechargeMax: cfg.rechargeMs / 1000
+      });
+    }
+  }
+
+    // ===== HP/피해 처리 =====
+    takeDamage(n = 0, skillId = null, staggerTimeOverride = null) {
+        // 무적 상태일 때 피해 무시
+        if (this.isInvincible) {
+            return;
+        }
+        // 중복 히트 방지: 같은 attackId는 1회만 허용
+        if (skillId) {
+            if (this.hitProcessed.has(skillId)) return;
+            this.hitProcessed.add(skillId);
+        }
+        
+        const oldHp = this.hp;
         this.hp = Math.max(0, this.hp - (n|0));
+        
         this.events.emit('hp:changed', { hp: this.hp, maxHp: this.maxHp });
         if (this.hp <= 0) this.events.emit('death');
+        
+        // 스킬별 기절 시간 적용
+        if (skillId) {
+            const staggerTime = (staggerTimeOverride ?? this.getStaggerTimeBySkillId(skillId)) | 0;
+            console.log('takeDamage - skillId:', skillId, 'staggerTime:', staggerTime);
+            if (staggerTime > 0) {
+                this.applyStagger(staggerTime);
+            }
+        }
+        
+        // 체력바 업데이트 (다른 캐릭터인 경우)
+        if (this.scene && this.scene._updateHealthBar) {
+            this.scene._updateHealthBar(this);
+        }
     }
     heal(n = 0) {
         this.hp = Math.min(this.maxHp, this.hp + (n|0));
         this.events.emit('hp:changed', { hp: this.hp, maxHp: this.maxHp });
+        
+        // 체력바 업데이트 (다른 캐릭터인 경우)
+        if (this.scene && this.scene._updateHealthBar) {
+            this.scene._updateHealthBar(this);
+        }
     }
     isAlive() { return this.hp > 0; }
-    receiveDamage(amount = 0, source = null) { this.takeDamage(amount); }
+    receiveDamage(amount = 0, source = null, skillId = null, staggerTime = null) { this.takeDamage(amount, skillId, staggerTime); }
 }

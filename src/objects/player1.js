@@ -21,7 +21,7 @@ export default class Player1 extends Player {
     this.onSkillI = () => this._skillDashHit();
 
     // === 캐릭터 고유 스탯 ===
-    this.maxHp = 20;
+    this.maxHp = 30;
     this.hp = this.maxHp;
     this.events.emit('hp:changed', { hp: this.hp, maxHp: this.maxHp });
     this.speed = 150;  // 캐릭터별 이동속도
@@ -29,7 +29,11 @@ export default class Player1 extends Player {
     // === 캐릭터 고유 스킬 수치 ===
     this.SLASH_DAMAGE = 3;
     this.DASH_DAMAGE  = 5;
-    this.DASH_COOLDOWN_MS = 2000;
+    this.DASH_COOLDOWN_MS = 4000;
+
+    // === 스킬별 스턴 시간 (밀리초) ===
+    this.SLASH_STAGGER_TIME = 100;  // U스킬: 0.5초 기절 (player2보다 짧음)
+    this.DASH_STAGGER_TIME = 100;   // I스킬: 0.8초 기절 (player2보다 짧음)
   }
 
     _ensureHitTexture(scene, r) {
@@ -57,6 +61,8 @@ export default class Player1 extends Player {
     const baseAngle = this._facingAngleRad();
     this.setCooldown('U', COOLDOWN);
     this.lockMovement(LIFETIME);
+    // 세션 종료 예약
+    this.scene.time.delayedCall(LIFETIME + 60, () => this.endAttackSession('U'));
 
     // 시각효과(선택): 반투명 부채꼴 그리기
     const g = scene.add.graphics().setDepth(10);
@@ -91,6 +97,8 @@ export default class Player1 extends Player {
         dot.setVisible(false);                // 디버그 시 true
         dot.owner = this;
         dot.damage = this.SLASH_DAMAGE;       // ⬅️ 슬래시 피해량
+        dot.staggerTime = this.SLASH_STAGGER_TIME; // ⬅️ 슬래시 스턴 시간
+        dot.skillId = this.getAttackSegmentId('U', 0); // 한 번의 베기(세그먼트 0)
         dot.body.setAllowGravity(false);
         dot.body.setImmovable(true);
         dot.body.setCircle(HIT_R, 0, 0);      // 중심 = (px, py)
@@ -110,6 +118,9 @@ export default class Player1 extends Player {
         speed: 900,
         width: 12,
         damage: this.DASH_DAMAGE,     // ⬅️ 대시 피해량
+        staggerTime: this.DASH_STAGGER_TIME, // ⬅️ 대시 스턴 시간
+        attack: true,                 // ⬅️ 대시 공격 여부 (true: 히트판정 생성)
+        invincible: false,             // ⬅️ 대시 중 무적 여부 (true: 피해 무시)
         wall: {
           layer: this.wallLayer,          // GameScene에서 this.player.wallLayer = this.wallLayer; 해둔 값
           mode: 'block_landing',          // 'always' | 'block_landing' | 'block_all'

@@ -18,6 +18,8 @@ export default class HUD extends Phaser.GameObjects.Container {
     this.skillMasks = {};
     this.skillTexts = {};
     this.skillFillers = {};
+    this.skillRechargeFillers = {};
+    this.skillStackTexts = {};
 
     this.relayout();
     scene.scale.on('resize', () => this.relayout());
@@ -47,23 +49,34 @@ export default class HUD extends Phaser.GameObjects.Container {
     if (!this.skillIcons[id]) {
       const icon = this.scene.add.rectangle(x + size/2, y + size/2, size, size, 0xaaaaaa)
         .setStrokeStyle(2, 0x555555).setDepth(1000);
+      
+      // 마스크 없이 직접 그리는 방식으로 변경
       const filler = this.scene.add.graphics().setDepth(1001);
-      const maskShape = this.scene.add.graphics();
-      const mask = maskShape.createGeometryMask();
-      filler.setMask(mask);
+      const rechargeFiller = this.scene.add.graphics().setDepth(1002);
       const txt = this.scene.add.text(x + size/2, y + size/2, '', {
         fontSize: 10, color: '#ffffff'
-      }).setOrigin(0.5).setDepth(1002);
+      }).setOrigin(0.5).setDepth(1003);
+      const stackTxt = this.scene.add.text(x + size - 2, y + size - 1, '', {
+        fontSize: 9, color: '#ffffff', align: 'right'
+      }).setOrigin(1, 1).setDepth(1004);
 
-      this.add([icon, filler, txt]);
+      this.add([icon, filler, rechargeFiller, txt, stackTxt]);
       this.skillIcons[id] = { icon, size };
-      this.skillMasks[id] = { maskShape, mask };
+      this.skillMasks[id] = null; // 마스크 사용 안함
       this.skillFillers[id] = filler;
       this.skillTexts[id] = txt;
+      this.skillRechargeFillers[id] = rechargeFiller;
+      this.skillStackTexts[id] = stackTxt;
+      
+      // 초기 상태 설정 - 쿨타임 없음
+      this.updateSkillMask(id, 0, 0);
+      this.updateSkillRechargeMask(id, 0);
     } else {
       const { icon } = this.skillIcons[id];
       icon.setPosition(x + size/2, y + size/2);
       this.skillTexts[id].setPosition(x + size/2, y + size/2);
+      this.skillRechargeFillers[id].setDepth(1002);
+      this.skillStackTexts[id].setPosition(x + size - 2, y + size - 1);
     }
   }
 
@@ -93,25 +106,61 @@ export default class HUD extends Phaser.GameObjects.Container {
   updateSkillMask(id, ratio, leftSec = 0) {
     const icon = this.skillIcons[id]; if (!icon) return;
     const filler = this.skillFillers[id];
-    const { maskShape } = this.skillMasks[id];
-    const cx = icon.icon.x, cy = icon.icon.y, r = icon.size/2 - 2;
+    const cx = icon.icon.x, cy = icon.icon.y;
+    const halfSize = icon.size / 2;
 
-    // 파이(부채꼴) 다시 그리기 — Phaser 3.55 호환 (arc 사용)
+    // 네모 모양의 부채꼴 그리기
     filler.clear();
     if (ratio > 0) {
-      const start = -Math.PI / 2;                 // 12시 방향
-      const end   = start + Math.PI * 2 * ratio;  // 시계 방향 증분
-      filler.fillStyle(0x000000, 0.45);
+      // 12시 방향에서 시작 (위쪽 중앙)
+      const start = Math.PI / 4;                 // 12시 방향
+      const end   = start - Math.PI * 2 * ratio;    // 시계 방향 증분
+      
+      // 네모 모양의 부채꼴 그리기
+      filler.fillStyle(0x000000, 0.3);
       filler.beginPath();
       filler.moveTo(cx, cy);
-      filler.arc(cx, cy, r, start, end, false);   // false = 시계 방향
+      
+      // 네모 경계선을 따라 부채꼴 그리기
+      const segments = Math.max(20, Math.floor(ratio * 60));
+      for (let i = 0; i <= segments; i++) {
+        const angle = start + (end - start) * (i / segments);
+        
+        // 각도에 따라 네모 경계선에서의 위치 계산
+        let x, y;
+        
+        // 각도를 0~2π 범위로 정규화
+        let normalizedAngle = angle;
+        while (normalizedAngle < 0) normalizedAngle += 2 * Math.PI;
+        while (normalizedAngle >= 2 * Math.PI) normalizedAngle -= 2 * Math.PI;
+        
+        if (normalizedAngle >= 0 && normalizedAngle < Math.PI/2) {
+          // 위쪽 변 (12시 → 3시) - 12시가 위쪽 중앙에서 시작
+          const t = normalizedAngle / (Math.PI/2);
+          x = cx - halfSize + t * icon.size;
+          y = cy - halfSize;
+        } else if (normalizedAngle >= Math.PI/2 && normalizedAngle < Math.PI) {
+          // 오른쪽 변 (3시 → 6시)
+          const t = (normalizedAngle - Math.PI/2) / (Math.PI/2);
+          x = cx + halfSize;
+          y = cy - halfSize + t * icon.size;
+        } else if (normalizedAngle >= Math.PI && normalizedAngle < 3*Math.PI/2) {
+          // 아래쪽 변 (6시 → 9시)
+          const t = (normalizedAngle - Math.PI) / (Math.PI/2);
+          x = cx + halfSize - t * icon.size;
+          y = cy + halfSize;
+        } else {
+          // 왼쪽 변 (9시 → 12시)
+          const t = (normalizedAngle - 3*Math.PI/2) / (Math.PI/2);
+          x = cx - halfSize;
+          y = cy + halfSize - t * icon.size;
+        }
+        
+        filler.lineTo(x, y);
+      }
       filler.closePath();
       filler.fillPath();
     }
-
-    maskShape.clear();
-    maskShape.fillStyle(0xffffff, 1);
-    maskShape.fillRoundedRect(cx - icon.size/2, cy - icon.size/2, icon.size, icon.size, 6);
 
     // 중앙 숫자(디버그): 남은 초 표시
     if (this.skillTexts?.[id]) {
@@ -119,10 +168,52 @@ export default class HUD extends Phaser.GameObjects.Container {
     }
   }
 
+  // 충전(리차지) 오버레이 업데이트 - 빨간 반투명
+  updateSkillRechargeMask(id, ratio) {
+    const icon = this.skillIcons[id]; if (!icon) return;
+    const filler = this.skillRechargeFillers[id];
+    const cx = icon.icon.x, cy = icon.icon.y;
+    const halfSize = icon.size / 2;
+
+    filler.clear();
+    if (ratio > 0) {
+      const start = Math.PI / 4;                 // 12시 방향
+      const end   = start - Math.PI * 2 * ratio; // 시계 방향
+      filler.fillStyle(0xff0000, 0.35);
+      filler.beginPath();
+      filler.moveTo(cx, cy);
+      const segments = Math.max(20, Math.floor(ratio * 60));
+      for (let i = 0; i <= segments; i++) {
+        const angle = start + (end - start) * (i / segments);
+        let x, y;
+        let normalizedAngle = angle;
+        while (normalizedAngle < 0) normalizedAngle += 2 * Math.PI;
+        while (normalizedAngle >= 2 * Math.PI) normalizedAngle -= 2 * Math.PI;
+        if (normalizedAngle >= 0 && normalizedAngle < Math.PI/2) {
+          const t = normalizedAngle / (Math.PI/2);
+          x = cx - halfSize + t * icon.size; y = cy - halfSize;
+        } else if (normalizedAngle >= Math.PI/2 && normalizedAngle < Math.PI) {
+          const t = (normalizedAngle - Math.PI/2) / (Math.PI/2);
+          x = cx + halfSize; y = cy - halfSize + t * icon.size;
+        } else if (normalizedAngle >= Math.PI && normalizedAngle < 3*Math.PI/2) {
+          const t = (normalizedAngle - Math.PI) / (Math.PI/2);
+          x = cx + halfSize - t * icon.size; y = cy + halfSize;
+        } else {
+          const t = (normalizedAngle - 3*Math.PI/2) / (Math.PI/2);
+          x = cx - halfSize; y = cy + halfSize - t * icon.size;
+        }
+        filler.lineTo(x, y);
+      }
+      filler.closePath();
+      filler.fillPath();
+    }
+  }
+
   bind(player) {
     if (this.player) {
       this.player.events.off('hp:changed', this._hpHandler);
       this.player.events.off('skill:cd', this._cdHandler);
+      this.player.events.off('skill:charge', this._chargeHandler);
       this.player.events.off('death', this._deathHandler);
     }
 
@@ -138,9 +229,23 @@ export default class HUD extends Phaser.GameObjects.Container {
       // 현재 구조: I=대시(슬롯1), U=슬래시(슬롯2)
       const slot = (id === 'I') ? 1 : 2;
       const ratio = (max > 0) ? Phaser.Math.Clamp(cd / max, 0, 1) : 0;
+      
       this.updateSkillMask(slot, ratio, cd);
     };
     player.events.on('skill:cd', this._cdHandler);
+
+    // 충전(스택/리차지) 갱신
+    this._chargeHandler = ({ id, charges, maxCharges, rechargeLeft, rechargeMax }) => {
+      const slot = (id === 'I') ? 1 : 2;
+      // 스택 숫자 우하단 표시
+      if (this.skillStackTexts?.[slot]) {
+        this.skillStackTexts[slot].setText(typeof charges === 'number' ? String(charges) : '');
+      }
+      // 리차지 오버레이
+      const ratio = (rechargeMax > 0) ? Phaser.Math.Clamp((rechargeLeft ?? 0) / rechargeMax, 0, 1) : 0;
+      this.updateSkillRechargeMask(slot, ratio);
+    };
+    player.events.on('skill:charge', this._chargeHandler);
 
     // 사망 이벤트
     this._deathHandler = () => this._startDeathFlow();
