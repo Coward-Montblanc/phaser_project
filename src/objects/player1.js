@@ -1,5 +1,6 @@
 import Player, { FACING_TO_RAD } from "./Player.js";
 import { runDash } from "../SkillMech/Dash.js";
+import { fireProjectiles } from "../services/projectiles.js";
 import {
   ensureSpriteAnimations,
   getIdleFrame,
@@ -30,6 +31,12 @@ export default class Player1 extends Player {
       immovable: true,
     });
 
+    // 투사체 전용 그룹(겹침/충돌용)
+    this.projectileGroup = scene.physics.add.group({
+      allowGravity: false,
+      immovable: true,
+    });
+
     // 스킬 구현 바인딩
     this.bindSkill("Z", () => this._skillSlash180(), {
       mouseAim: true,
@@ -40,6 +47,10 @@ export default class Player1 extends Player {
       mouseAim: true,
       aimLock: true,
       aimLockMs: 150,
+    });
+    this.bindSkill("C", () => this._skillConeProjectiles(), {
+      mouseAim: true,
+      aimLock: false,
     });
     // C는 미구현: 바인딩만 가능하도록 비워둠
 
@@ -57,6 +68,30 @@ export default class Player1 extends Player {
     // === 스킬별 스턴 시간 (밀리초) ===
     this.SLASH_STAGGER_TIME = 100; // U스킬: 0.5초 기절 (player2보다 짧음)
     this.DASH_STAGGER_TIME = 100; // I스킬: 0.8초 기절 (player2보다 짧음)
+  }
+
+  /** 전방 90도 콘으로 5발 투사체 발사 */
+  _skillConeProjectiles() {
+    // 쿨다운 설정
+    const COOLDOWN = 1500;
+    this.setCooldown("C", COOLDOWN);
+
+    // 파라미터
+    const config = {
+      spreadDeg: 10,
+      count: 5,
+      radius: Math.floor(Math.max(this.width, this.height) * 0.35),
+      speed: 500,
+      lifeMs: 1200,
+      damage: 6,
+      ricochet: false,
+      bounceCount: 0,
+      skillKey: "C",
+      baseAngleRad: this._mouseAngleRad(),
+      // 초근접 다탄 히트 보장을 위해 총구를 거의 몸 앞(0px)에 두기
+      startOffset: 0,
+    };
+    fireProjectiles(this, config);
   }
 
   _ensureHitTexture(scene, r) {

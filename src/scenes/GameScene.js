@@ -171,6 +171,34 @@ export default class GameScene extends Phaser.Scene {
       }
     );
 
+    // 조작 주체의 projectileGroup 타겟 간 겹침 판정(있을 때만)
+    if (this.player.projectileGroup) {
+      this.physics.add.overlap(
+        this.player.projectileGroup,
+        this.targets,
+        (proj, target) => {
+          if (proj.owner === target) return;
+          if (typeof target.receiveDamage === "function") {
+            const dmg = proj.damage ?? 0;
+            if (dmg > 0) {
+              const skillId = proj.skillId || "proj_unknown";
+              const staggerTime = proj.staggerTime || 0;
+              target.receiveDamage(dmg, proj.owner, skillId, staggerTime);
+            }
+          }
+          if (proj && proj.active) proj.destroy();
+        }
+      );
+      // 벽과 충돌 시 투사체 제거
+      this.physics.add.collider(
+        this.player.projectileGroup,
+        wallLayer,
+        (proj) => {
+          if (proj && proj.active) proj.destroy();
+        }
+      );
+    }
+
     // --- 충돌자 (자유이동 전용) ---
     this.wallCollider = this.physics.add.collider(this.player, wallLayer);
     this.wallCollider.active = true;

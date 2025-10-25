@@ -44,7 +44,9 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
     this.setCollideWorldBounds(true);
     this.body.setImmovable(false);
     this.body.moves = true;
-    this.setSize(12, 12).setOffset(2, 2);
+    // 스프라이트/물리 바디를 중앙 기준으로 사용
+    this.setOrigin(0.5, 0.5);
+    this._applyBodySize(12, 12);
 
     // 상태
     this.facing = "down";
@@ -92,6 +94,36 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
 
     // 스킬별 조준 각도(사용 시점의 스냅샷)
     this._skillAimAngle = 0;
+  }
+
+  /** 현재 스프라이트 프레임 크기 기준으로 바디 오프셋을 정중앙에 맞춤 */
+  _centerBodyOffsets() {
+    const body = this.body;
+    if (!body) return;
+    const bw = body.width || 0;
+    const bh = body.height || 0;
+    const sw = this.width || this.displayWidth || 0;
+    const sh = this.height || this.displayHeight || 0;
+    if (bw > 0 && bh > 0 && sw > 0 && sh > 0) {
+      const offX = Math.round((sw - bw) / 2);
+      const offY = Math.round((sh - bh) / 2);
+      body.setOffset(offX, offY);
+    }
+  }
+
+  /** 바디 크기 지정 후 중앙 정렬 적용 */
+  _applyBodySize(w = 12, h = 12) {
+    if (this.body) {
+      this.body.setSize(w, h);
+      this._centerBodyOffsets();
+    }
+  }
+
+  /** 텍스처/프레임 변경 시에도 항상 중앙 기준을 유지 */
+  setTexture(key, frame) {
+    super.setTexture(key, frame);
+    this._centerBodyOffsets();
+    return this;
   }
 
   /** 일정 시간 동안 이동/입력 잠금 */
