@@ -3,6 +3,7 @@ import Player2 from "../objects/player2.js";
 import TempPlayer1 from "../objects/tempplayer1.js";
 import TempPlayer2 from "../objects/tempplayer2.js";
 import Player3 from "../objects/player3.js";
+import Player4 from "../objects/player4.js";
 import HUD from "../ui/HUD.js";
 import { TeleportManager } from "../services/teleport.js";
 import { GAME } from "../constants.js";
@@ -55,6 +56,8 @@ export default class GameScene extends Phaser.Scene {
       this.player = new Player2(this, GAME.START_TILE.X, GAME.START_TILE.Y);
     } else if (selectedCharacter === "player3") {
       this.player = new Player3(this, GAME.START_TILE.X, GAME.START_TILE.Y);
+    } else if (selectedCharacter === "player4") {
+      this.player = new Player4(this, GAME.START_TILE.X, GAME.START_TILE.Y);
     } else if (selectedCharacter === "tempplayer1") {
       this.player = new TempPlayer1(this, GAME.START_TILE.X, GAME.START_TILE.Y);
     } else if (selectedCharacter === "tempplayer2") {
