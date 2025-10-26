@@ -2,7 +2,7 @@ import Player, { FACING_TO_RAD } from "./Player.js";
 import { runDash } from "../SkillMech/Dash.js";
 import { fireBeam } from "../services/beam.js";
 import { shakeCamera } from "../services/cameraFx.js";
-import { selfKnockback } from "../services/knockback.js";
+import { selfKnockback, targetKnockback } from "../services/knockback.js";
 import {
   ensureSpriteAnimations,
   getIdleFrame,
@@ -44,10 +44,9 @@ export default class Player2 extends Player {
     });
 
     // 스킬 구현 바인딩 (I는 충전식)
-    this.bindSkill("Z", () => this._skillSlash180(), {
+    this.bindSkill("Z", () => this._skillArcBurst(), {
       mouseAim: true,
-      aimLock: true,
-      aimLockMs: 80,
+      aimLock: false,
     });
     this.bindSkill("X", () => this._skillDashHit(), {
       charged: true,
@@ -84,27 +83,62 @@ export default class Player2 extends Player {
   }
   /** 광선 스킬: 마우스 방향, 0.3초 유지 */
   _skillBeam() {
-    const angle = this._mouseAngleRad();
+    const angle = this.getSkillAimAngle();
     // 쿨타임 적용
     this.setCooldownCurrent(this.BEAM_COOLDOWN_MS);
-    // 연출: 카메라 살짝 흔들기
-    shakeCamera(this.scene, { durationMs: 90, intensity: 0.024 });
-    // 자기 넉백: 발사 방향 반대로 1~2px
-    selfKnockback(this, {
-      direction: "opposite",
-      distancePx: 20,
-      angleRad: angle,
-    });
-    fireBeam(this, {
-      thickness: 30,
-      durationMs: 300,
-      color: 0xffffff,
-      wallPierce: false,
-      maxLength: 600,
-      damage: 29,
-      staggerTime: this.BEAM_STAGGER_TIME,
-      skillKey: "C",
-      baseAngleRad: angle,
+
+    // 선딜 동안 이동/입력 잠금
+    const PRE_CAST_MS = 130;
+    this.lockMovement(PRE_CAST_MS);
+
+    // 0.13초 텔레그래프: 빨간 중앙선 표시
+    const scene = this.scene;
+    const wl = this.wallLayer;
+    const step = 4;
+    const maxLength = 600;
+    let len = 0;
+    let rx = this.x,
+      ry = this.y;
+    const maxW = wl?.tilemap?.widthInPixels ?? scene.scale.width;
+    const maxH = wl?.tilemap?.heightInPixels ?? scene.scale.height;
+    while (len < 2000 && rx >= 0 && ry >= 0 && rx < maxW && ry < maxH) {
+      const tx = wl.worldToTileX(rx);
+      const ty = wl.worldToTileY(ry);
+      if (wl.hasTileAt(tx, ty)) break;
+      len += step;
+      rx += Math.cos(angle) * step;
+      ry += Math.sin(angle) * step;
+      if (len >= maxLength) break;
+    }
+    const tele = scene.add.graphics().setDepth(9);
+    tele.lineStyle(2, 0xff3333, 1);
+    tele.beginPath();
+    tele.moveTo(this.x, this.y);
+    tele.lineTo(this.x + Math.cos(angle) * len, this.y + Math.sin(angle) * len);
+    tele.strokePath();
+
+    // 130ms 후 실제 발사
+    scene.time.delayedCall(PRE_CAST_MS, () => {
+      tele.destroy();
+      // 연출: 카메라 살짝 흔들기
+      shakeCamera(this.scene, { durationMs: 90, intensity: 0.024 });
+      // 자기 넉백
+      selfKnockback(this, {
+        direction: "opposite",
+        distancePx: 20,
+        angleRad: angle,
+      });
+      fireBeam(this, {
+        thickness: 30,
+        durationMs: 300,
+        color: 0xffffff,
+        wallPierce: false,
+        maxLength: 600,
+        damage: 29,
+        staggerTime: this.BEAM_STAGGER_TIME,
+        skillKey: "C",
+        baseAngleRad: angle,
+      });
     });
   }
 
@@ -117,6 +151,120 @@ export default class Player2 extends Player {
     g.generateTexture(key, r * 2, r * 2);
     g.destroy();
     return key;
+  }
+
+  /** Z 스킬: 상대위치(최대 90)로 0.5초 간격 4연발 곡선 투사체 → 도착시 폭발 */
+  _skillArcBurst() {
+    const scene = this.scene;
+    // 스킬 시전 시점의 상대 오프셋(클램프 90)
+    const pointer = scene.input.activePointer;
+    pointer.updateWorldPoint(scene.cameras.main);
+    let dx = pointer.worldX - this.x;
+    let dy = pointer.worldY - this.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const maxR = 90;
+    if (len > maxR) {
+      dx = (dx / len) * maxR;
+      dy = (dy / len) * maxR;
+    }
+    const rel = { x: dx, y: dy };
+
+    // 사용 중 이동 가능: 이동 잠금 없음. 쿨타임만 적용
+    this.setCooldownCurrent(3000);
+
+    const fireOnce = (shotIndex) => {
+      // 발사 시점의 목표 지점은 현재 위치 + 초기 rel (상대좌표 유지)
+      const sx = this.x;
+      const sy = this.y;
+      const ex = this.x + rel.x;
+      const ey = this.y + rel.y;
+
+      // 곡선 경로: 시작→끝, 좌상 반원 느낌의 베지어 제어점
+      const dirx = (ex - sx) / (Math.hypot(ex - sx, ey - sy) || 1);
+      const diry = (ey - sy) / (Math.hypot(ex - sx, ey - sy) || 1);
+      // 왼쪽/위 방향의 수직 벡터(좌측 법선)
+      const nx = -diry;
+      const ny = dirx;
+      const baseLen = Math.hypot(ex - sx, ey - sy);
+      const theta = Math.atan2(diry, dirx);
+      const curvature = (1 - Math.abs(Math.sin(theta))) * (baseLen * 0.5);
+      const mx = (sx + ex) * 0.5;
+      const my = (sy + ey) * 0.5;
+      const cx = mx + nx * curvature;
+      const cy = my + ny * curvature;
+
+      // 비주얼 투사체(히트 없음, 벽 관통)
+      const p = scene.add.image(sx, sy, this.HIT_TEX).setVisible(true);
+      p.setDepth(8);
+
+      // t:0→1 베지어 이동
+      const travelMs = 350;
+      const tw = scene.tweens.addCounter({
+        from: 0,
+        to: 1,
+        duration: travelMs,
+        ease: "Sine.easeInOut",
+        onUpdate: (tween) => {
+          const t = tween.getValue();
+          const it = 1 - t;
+          const bx = it * it * sx + 2 * it * t * cx + t * t * ex;
+          const by = it * it * sy + 2 * it * t * cy + t * t * ey;
+          p.setPosition(bx, by);
+        },
+        onComplete: () => {
+          // 폭발 이펙트 + 피해/스턴 + 넉백(밖으로)
+          p.destroy();
+          this._zExplode(ex, ey, 30);
+        },
+      });
+    };
+
+    // 0.5초 간격 4발
+    for (let i = 0; i < 4; i++) {
+      scene.time.delayedCall(i * 500, () => fireOnce(i));
+    }
+  }
+
+  _zExplode(cx, cy, radius) {
+    const scene = this.scene;
+    // 시각효과(하얀 원 확산)
+    const g = scene.add.graphics().setDepth(10);
+    g.fillStyle(0xffffff, 0.9);
+    g.fillCircle(cx, cy, 4);
+    scene.tweens.add({
+      targets: g,
+      duration: 240,
+      alpha: 0,
+      onUpdate: (tw) => {
+        const v = 1 - tw.getValue();
+        g.clear();
+        g.fillStyle(0xffffff, 0.6 + 0.3 * v);
+        g.fillCircle(cx, cy, radius * (1 + 0.3 * v));
+      },
+      onComplete: () => g.destroy(),
+    });
+
+    // 피해/기절/넉백 적용
+    const targets = scene.targets?.getChildren?.() || [];
+    for (const t of targets) {
+      if (!t || !t.active || t === this) continue;
+      const dx = t.x - cx;
+      const dy = t.y - cy;
+      const d = Math.hypot(dx, dy);
+      if (d <= radius) {
+        // 개별 투사체마다 피해 부여(중복 허용) → 고유 ID 사용
+        const skillId = this.getAttackSegmentId("Z", scene.time.now | 0);
+        if (typeof t.receiveDamage === "function") {
+          t.receiveDamage(8, this, skillId, 300);
+        }
+        // 넉백: 중심에서 바깥 방향 10px (벽 차단 고려)
+        if (!t.wallLayer) t.wallLayer = this.wallLayer;
+        targetKnockback({ x: cx, y: cy }, t, {
+          direction: "away",
+          distancePx: 20,
+        });
+      }
+    }
   }
 
   /** 5번 연속 베기 스킬 */

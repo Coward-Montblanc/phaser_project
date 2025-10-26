@@ -96,6 +96,24 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
     this._skillAimAngle = 0;
     // 현재 실행 중인 스킬 키(쿨다운 자동 적용용)
     this._activeSkillKey = null;
+    this._lastEnabledBroadcastAt = 0;
+  }
+
+  _isSkillEnabled(key, cfg) {
+    // 타겟 필요 조건
+    if (cfg && cfg.requireTargetInRange && cfg.requireTargetInRange > 0) {
+      const r = cfg.requireTargetInRange;
+      const r2 = r * r;
+      const targets = this.scene?.targets?.getChildren?.() || [];
+      for (const t of targets) {
+        if (!t || !t.active || t === this) continue;
+        const dx = t.x - this.x;
+        const dy = t.y - this.y;
+        if (dx * dx + dy * dy <= r2) return true;
+      }
+      return false;
+    }
+    return true;
   }
 
   /** 현재 스프라이트 프레임 크기 기준으로 바디 오프셋을 정중앙에 맞춤 */
@@ -513,6 +531,20 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
         rechargeMax: (cfg.rechargeMs ?? 0) / 1000,
       });
     }
+
+    // 사용 가능 상태 주기적 브로드캐스트(150ms)
+    const now2 = this.scene.time.now;
+    if (
+      !this._lastEnabledBroadcastAt ||
+      now2 - this._lastEnabledBroadcastAt >= 150
+    ) {
+      for (const [key, cfg] of this.skillConfigs) {
+        if (!cfg) continue;
+        const en = this._isSkillEnabled(key, cfg);
+        this.events.emit("skill:enabled", { id: key, enabled: !!en });
+      }
+      this._lastEnabledBroadcastAt = now2;
+    }
   }
 
   _handleSkillInput() {
@@ -565,6 +597,13 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
     const now = this.scene.time.now;
     const cfg = this.skillConfigs.get(key);
     const next = this.cooldowns.get(key) ?? 0;
+    // 사용 가능 조건(예: 타겟 필요) 사전 체크
+    const enabled = this._isSkillEnabled(key, cfg);
+    if (!enabled) {
+      // HUD에 즉시 반영
+      this.events.emit("skill:enabled", { id: key, enabled: false });
+      return;
+    }
 
     // 잠금 중에는 시도하지 않음(이중 안전장치)
     if (this.isSkillLock || this.isStaggered) return;
@@ -676,6 +715,7 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
       aimLock: !!config.aimLock,
       aimLockMs: config.aimLockMs ?? 0,
       autoHold: config.autoHold ?? true,
+      requireTargetInRange: config.requireTargetInRange ?? 0,
     };
     this.skillConfigs.set(key, cfg);
 

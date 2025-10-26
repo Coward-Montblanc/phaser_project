@@ -1,5 +1,7 @@
 import Player1 from "../objects/player1.js";
 import Player2 from "../objects/player2.js";
+import TempPlayer1 from "../objects/tempplayer1.js";
+import TempPlayer2 from "../objects/tempplayer2.js";
 import Player3 from "../objects/player3.js";
 import HUD from "../ui/HUD.js";
 import { TeleportManager } from "../services/teleport.js";
@@ -7,6 +9,7 @@ import { GAME } from "../constants.js";
 import { Pathfinder } from "../services/pathfinding.js";
 import { MovementController } from "../services/movement.js";
 import { preloadUnifiedSprite } from "../services/spriteSet.js";
+import { targetKnockback } from "../services/knockback.js";
 
 export default class GameScene extends Phaser.Scene {
   constructor() {
@@ -52,6 +55,10 @@ export default class GameScene extends Phaser.Scene {
       this.player = new Player2(this, GAME.START_TILE.X, GAME.START_TILE.Y);
     } else if (selectedCharacter === "player3") {
       this.player = new Player3(this, GAME.START_TILE.X, GAME.START_TILE.Y);
+    } else if (selectedCharacter === "tempplayer1") {
+      this.player = new TempPlayer1(this, GAME.START_TILE.X, GAME.START_TILE.Y);
+    } else if (selectedCharacter === "tempplayer2") {
+      this.player = new TempPlayer2(this, GAME.START_TILE.X, GAME.START_TILE.Y);
     } else {
       this.player = new Player1(this, GAME.START_TILE.X, GAME.START_TILE.Y);
     }
@@ -144,6 +151,27 @@ export default class GameScene extends Phaser.Scene {
             const skillId = hitbox.skillId || "slash_unknown";
             const staggerTime = hitbox.staggerTime || 0; // 스턴 시간 가져오기
             target.receiveDamage(dmg, hitbox.owner, skillId, staggerTime);
+            // 전방 동반 밀기: 스킬ID 단위로 1회만 적용
+            if (hitbox.pushDistance && hitbox.pushDistance > 0) {
+              if (target._lastPushedById !== skillId) {
+                target._lastPushedById = skillId;
+                const ang =
+                  hitbox.pushAngle ?? hitbox.owner?._facingAngleRad?.() ?? 0;
+                if (!target.wallLayer) target.wallLayer = this.wallLayer;
+                targetKnockback(
+                  hitbox.owner || {
+                    getSkillAimAngle: () => ang,
+                    _facingAngleRad: () => ang,
+                  },
+                  target,
+                  {
+                    direction: "skill",
+                    distancePx: hitbox.pushDistance,
+                    angleRad: ang,
+                  }
+                );
+              }
+            }
           }
         }
         // 피격 연출

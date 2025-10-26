@@ -21,6 +21,7 @@ export default class HUD extends Phaser.GameObjects.Container {
     this.skillTexts = {};
     this.skillFillers = {};
     this.skillRechargeFillers = {};
+    this.skillDisabledOverlays = {};
     this.skillStackTexts = {};
 
     this.relayout();
@@ -80,12 +81,17 @@ export default class HUD extends Phaser.GameObjects.Container {
         .setOrigin(1, 1)
         .setDepth(1004);
 
-      this.add([icon, filler, rechargeFiller, txt, stackTxt]);
+      const disabledOverlay = this.scene.add
+        .rectangle(x + size / 2, y + size / 2, size, size, 0x000000, 0.45)
+        .setDepth(1005)
+        .setVisible(false);
+      this.add([icon, filler, rechargeFiller, txt, stackTxt, disabledOverlay]);
       this.skillIcons[id] = { icon, size };
       this.skillMasks[id] = null; // 마스크 사용 안함
       this.skillFillers[id] = filler;
       this.skillTexts[id] = txt;
       this.skillRechargeFillers[id] = rechargeFiller;
+      this.skillDisabledOverlays[id] = disabledOverlay;
       this.skillStackTexts[id] = stackTxt;
 
       // 초기 상태 설정 - 쿨타임 없음
@@ -98,6 +104,21 @@ export default class HUD extends Phaser.GameObjects.Container {
       this.skillRechargeFillers[id].setDepth(1002);
       this.skillStackTexts[id].setPosition(x + size - 2, y + size - 1);
     }
+  }
+
+  updateSkillEnabled(id, enabled) {
+    const slot = id === "Z" ? 1 : id === "X" ? 2 : 3;
+    const ov = this.skillDisabledOverlays?.[slot];
+    if (!ov) return;
+    ov.setVisible(!enabled);
+  }
+
+  // 특수 상태(예: 버프 잠금)일 때 오버레이 색/알파를 지정
+  setSkillOverlayColor(id, color = 0x000000, alpha = 0.45) {
+    const slot = id === "Z" ? 1 : id === "X" ? 2 : 3;
+    const ov = this.skillDisabledOverlays?.[slot];
+    if (!ov) return;
+    ov.setFillStyle(color, alpha);
   }
 
   drawHp(hp, maxHp) {
@@ -258,6 +279,7 @@ export default class HUD extends Phaser.GameObjects.Container {
       this.player.events.off("hp:changed", this._hpHandler);
       this.player.events.off("skill:cd", this._cdHandler);
       this.player.events.off("skill:charge", this._chargeHandler);
+      this.player.events.off("skill:enabled", this._enabledHandler);
       this.player.events.off("death", this._deathHandler);
     }
 
@@ -302,6 +324,11 @@ export default class HUD extends Phaser.GameObjects.Container {
       this.updateSkillRechargeMask(slot, ratio);
     };
     player.events.on("skill:charge", this._chargeHandler);
+
+    // 사용 가능/불가 상태(회색 오버레이)
+    this._enabledHandler = ({ id, enabled }) =>
+      this.updateSkillEnabled(id, enabled);
+    player.events.on("skill:enabled", this._enabledHandler);
 
     // 사망 이벤트
     this._deathHandler = () => this._startDeathFlow();

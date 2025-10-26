@@ -50,7 +50,10 @@ export default class CharacterSelect extends Phaser.Scene {
     // 캐릭터 배치(각 키에 해당하는 인덱스 지정)
     this.placeCharacter(0, 0, "player1", 0);
     this.placeCharacter(1, 0, "player2", 1);
-    this.placeCharacter(2, 0, "player3", 2);
+    this.placeCharacter(2, 0, "player3", 39);
+    // temp 캐릭터: 맨 왼쪽 아래 라인
+    this.placeCharacter(0, this.gridHeight - 1, "tempplayer1", 3);
+    this.placeCharacter(1, this.gridHeight - 1, "tempplayer2", 39);
 
     // 조작 안내
     this.add

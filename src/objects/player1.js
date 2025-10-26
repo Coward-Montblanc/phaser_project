@@ -52,6 +52,7 @@ export default class Player1 extends Player {
       mouseAim: true,
       aimLock: true,
       aimLockMs: 150,
+      requireTargetInRange: 90,
     });
     this.bindSkill("C", () => this._skillVortexField(), {
       mouseAim: true,
