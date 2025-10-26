@@ -1,5 +1,6 @@
 import Player1 from "../objects/player1.js";
 import Player2 from "../objects/player2.js";
+import Player3 from "../objects/player3.js";
 import HUD from "../ui/HUD.js";
 import { TeleportManager } from "../services/teleport.js";
 import { GAME } from "../constants.js";
@@ -49,6 +50,8 @@ export default class GameScene extends Phaser.Scene {
     // 선택된 캐릭터에 따라 적절한 플레이어 클래스 사용
     if (selectedCharacter === "player2") {
       this.player = new Player2(this, GAME.START_TILE.X, GAME.START_TILE.Y);
+    } else if (selectedCharacter === "player3") {
+      this.player = new Player3(this, GAME.START_TILE.X, GAME.START_TILE.Y);
     } else {
       this.player = new Player1(this, GAME.START_TILE.X, GAME.START_TILE.Y);
     }
@@ -92,6 +95,12 @@ export default class GameScene extends Phaser.Scene {
     // 더미 캐릭터 체력 설정
     dummy.maxHp = 30;
     dummy.hp = 30;
+    // 더미 체력 로그: 체력 변동 시 콘솔 표기
+    dummy.events.on("hp:changed", ({ hp, maxHp }) => {
+      console.log(`[DUMMY] HP: ${hp}/${maxHp}`);
+    });
+    // 초기 상태도 1회 표기
+    dummy.events.emit("hp:changed", { hp: dummy.hp, maxHp: dummy.maxHp });
 
     // 더미 캐릭터 체력바 생성
     this._createHealthBar(dummy);
@@ -102,6 +111,23 @@ export default class GameScene extends Phaser.Scene {
 
     // 더미 캐릭터 참조 저장
     this.dummy = dummy;
+
+    // --- 디버그: 플레이어-더미 거리 표시 (physics.arcade.debug가 true일 때만)
+    const physCfg = (this.sys?.game?.config?.physics || {}).arcade || {};
+    this._debugArcadeEnabled = !!physCfg.debug;
+    if (this._debugArcadeEnabled) {
+      this._distText = this.add
+        .text(8, 8, "dist(player,dummy): -", {
+          fontSize: "12px",
+          fill: "#e6e6e6",
+          fontFamily:
+            "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+          stroke: "#000000",
+          strokeThickness: 3,
+        })
+        .setScrollFactor(0)
+        .setDepth(1000);
+    }
 
     // 조작 주체의 slashGroup과 타겟 간 겹침 판정
     this.physics.add.overlap(
@@ -178,6 +204,11 @@ export default class GameScene extends Phaser.Scene {
         this.targets,
         (proj, target) => {
           if (proj.owner === target) return;
+          // 커스텀 onHit 훅이 있으면 우선 처리
+          if (typeof proj.onHit === "function") {
+            const res = proj.onHit(target, this);
+            if (res === "handled" || res === "skip") return;
+          }
           if (typeof target.receiveDamage === "function") {
             const dmg = proj.damage ?? 0;
             if (dmg > 0) {
@@ -189,12 +220,37 @@ export default class GameScene extends Phaser.Scene {
           if (proj && proj.active) proj.destroy();
         }
       );
-      // 벽과 충돌 시 투사체 제거
+      // 벽과 충돌: wallPierce면 물리 충돌 자체를 비활성화(process), 아니면 파괴
       this.physics.add.collider(
         this.player.projectileGroup,
         wallLayer,
         (proj) => {
-          if (proj && proj.active) proj.destroy();
+          if (proj && proj.active) {
+            if (!proj.wallPierce) proj.destroy();
+          }
+        },
+        (proj /*, tile */) => {
+          // process callback: true면 충돌 처리 수행, false면 무시(관통)
+          return !proj.wallPierce;
+        }
+      );
+    }
+
+    // 빔 그룹과 타겟 간 겹침 판정(있을 때만) - 1회 피해
+    if (this.player.beamGroup) {
+      this.physics.add.overlap(
+        this.player.beamGroup,
+        this.targets,
+        (hb, target) => {
+          if (hb.owner === target) return;
+          if (typeof target.receiveDamage === "function") {
+            const dmg = hb.damage ?? 0;
+            if (dmg > 0) {
+              const skillId = hb.skillId || "beam_unknown";
+              const staggerTime = hb.staggerTime || 0;
+              target.receiveDamage(dmg, hb.owner, skillId, staggerTime);
+            }
+          }
         }
       );
     }
@@ -262,6 +318,14 @@ export default class GameScene extends Phaser.Scene {
     this.movement.update(delta);
     if (this.player && typeof this.player.tickSkillsAndHud === "function") {
       this.player.tickSkillsAndHud();
+    }
+
+    // 디버그 거리 표시 업데이트
+    if (this._distText && this.player && this.dummy) {
+      const dx = this.player.x - this.dummy.x;
+      const dy = this.player.y - this.dummy.y;
+      const d = Math.hypot(dx, dy);
+      this._distText.setText(`dist(player,dummy): ${d.toFixed(1)} px`);
     }
 
     // 텔레포트 (이동/스킬 처리 후 체크)
@@ -349,6 +413,12 @@ export default class GameScene extends Phaser.Scene {
     this.dummy.hp = this.dummy.maxHp;
     this.dummy.active = true;
     this.dummy.setVisible(true);
+
+    // 체력 변경 로그 트리거
+    this.dummy.events.emit("hp:changed", {
+      hp: this.dummy.hp,
+      maxHp: this.dummy.maxHp,
+    });
 
     // 체력바 다시 보이기
     if (this.dummy.healthBar) {

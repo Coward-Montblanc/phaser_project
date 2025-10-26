@@ -94,6 +94,8 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
 
     // 스킬별 조준 각도(사용 시점의 스냅샷)
     this._skillAimAngle = 0;
+    // 현재 실행 중인 스킬 키(쿨다운 자동 적용용)
+    this._activeSkillKey = null;
   }
 
   /** 현재 스프라이트 프레임 크기 기준으로 바디 오프셋을 정중앙에 맞춤 */
@@ -577,12 +579,22 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
         this._skillAimAngle = cfg.mouseAim
           ? this._mouseAngleRad()
           : this._facingAngleRad();
+        // 스킬 사용 방향으로 스프라이트 바라보게(8방향 스냅)
+        {
+          const ang = this._skillAimAngle;
+          const fx = Math.cos(ang);
+          const fy = Math.sin(ang);
+          const face = vectorToFacing8(fx, fy);
+          if (face) this.facing = face;
+        }
         // 공통 에임 잠금 처리(옵션)
         if (cfg.aimLock) this.lockAimFor(cfg.aimLockMs ?? 200);
         const useCd = cfg.useCooldownMs ?? 0;
         if (useCd > 0) this.setCooldown(key, useCd);
         else this.beginAttackSession(key);
+        this._activeSkillKey = key;
         cb.call(this);
+        this._activeSkillKey = null;
         state.charges = Math.max(0, (state.charges | 0) - 1);
         if (state.charges < (cfg.maxCharges ?? 1)) {
           const now2 = this.scene.time.now;
@@ -606,11 +618,21 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
         this._skillAimAngle = cfg.mouseAim
           ? this._mouseAngleRad()
           : this._facingAngleRad();
+        // 스킬 사용 방향으로 스프라이트 바라보게(8방향 스냅)
+        {
+          const ang = this._skillAimAngle;
+          const fx = Math.cos(ang);
+          const fy = Math.sin(ang);
+          const face = vectorToFacing8(fx, fy);
+          if (face) this.facing = face;
+        }
         if (cfg.aimLock) this.lockAimFor(cfg.aimLockMs ?? 200);
       } else {
         this._skillAimAngle = this._facingAngleRad();
       }
+      this._activeSkillKey = key;
       cb.call(this);
+      this._activeSkillKey = null;
     }
   }
 
@@ -630,6 +652,13 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
       cd: msFromNow / 1000,
       max: msFromNow / 1000,
     });
+  }
+
+  /** 현재 실행 중인 스킬 키에 쿨다운 적용(스킬 구현에서 키 하드코딩 없이 호출) */
+  setCooldownCurrent(msFromNow) {
+    const k = this._activeSkillKey;
+    if (!k) return; // 안전장치: 활성 스킬이 없으면 무시
+    this.setCooldown(k, msFromNow);
   }
 
   /** 스킬 바인딩 및 메타 설정(충전식 여부 등) */
@@ -680,7 +709,7 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
     }
 
     const oldHp = this.hp;
-    this.hp = Math.max(0, this.hp - (n | 0));
+    this.hp = Math.max(0, this.hp - Number(n));
 
     this.events.emit("hp:changed", { hp: this.hp, maxHp: this.maxHp });
     if (this.hp <= 0) this.events.emit("death");
@@ -706,7 +735,7 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
     }
   }
   heal(n = 0) {
-    this.hp = Math.min(this.maxHp, this.hp + (n | 0));
+    this.hp = Math.min(this.maxHp, this.hp + Number(n));
     this.events.emit("hp:changed", { hp: this.hp, maxHp: this.maxHp });
 
     // 체력바 업데이트 (다른 캐릭터인 경우)

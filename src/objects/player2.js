@@ -1,5 +1,8 @@
 import Player, { FACING_TO_RAD } from "./Player.js";
 import { runDash } from "../SkillMech/Dash.js";
+import { fireBeam } from "../services/beam.js";
+import { shakeCamera } from "../services/cameraFx.js";
+import { selfKnockback } from "../services/knockback.js";
 import {
   ensureSpriteAnimations,
   getIdleFrame,
@@ -24,8 +27,18 @@ export default class Player2 extends Player {
     // 히트박스용 원 텍스처(지름=2R) 1회 생성
     this.HIT_R = 6;
     this.HIT_TEX = this._ensureHitTexture(scene, this.HIT_R);
+    // 메인 충돌 바디를 피격판정(원형) 기준으로 설정
+    if (this.body) {
+      this.body.setCircle(this.HIT_R, 0, 0);
+      this._centerBodyOffsets();
+    }
     // 히트박스 전용 그룹(겹침 판정용, 보이진 않음)
     this.dashGroup = scene.physics.add.group({
+      allowGravity: false,
+      immovable: true,
+    });
+    // 빔용 그룹
+    this.beamGroup = scene.physics.add.group({
       allowGravity: false,
       immovable: true,
     });
@@ -45,7 +58,12 @@ export default class Player2 extends Player {
       aimLock: true,
       aimLockMs: 120,
     });
-    // C는 미구현: 바인딩만 가능하도록 비워둠
+    // C: 광선형 스킬
+    this.bindSkill("C", () => this._skillBeam(), {
+      mouseAim: true,
+      aimLock: true,
+      aimLockMs: 60,
+    });
 
     // === 캐릭터 고유 스탯 ===
     this.maxHp = 25;
@@ -57,10 +75,37 @@ export default class Player2 extends Player {
     this.SLASH_DAMAGE = 1; // player1보다 낮은 데미지
     this.DASH_DAMAGE = 0; // player1보다 낮은 데미지
     this.DASH_COOLDOWN_MS = 1500; // player1보다 짧은 쿨다운
+    this.BEAM_COOLDOWN_MS = 2000; // C 스킬(광선) 쿨타임
+    this.BEAM_STAGGER_TIME = 0; // C 스킬(광선) 스턴 시간 (0이면 스턴 없음)
 
     // === 스킬별 스턴 시간 (밀리초) ===
     this.SLASH_STAGGER_TIME = 700; // U스킬: 1초 기절
     this.DASH_STAGGER_TIME = 0; // I스킬: 1초 기절
+  }
+  /** 광선 스킬: 마우스 방향, 0.3초 유지 */
+  _skillBeam() {
+    const angle = this._mouseAngleRad();
+    // 쿨타임 적용
+    this.setCooldownCurrent(this.BEAM_COOLDOWN_MS);
+    // 연출: 카메라 살짝 흔들기
+    shakeCamera(this.scene, { durationMs: 90, intensity: 0.024 });
+    // 자기 넉백: 발사 방향 반대로 1~2px
+    selfKnockback(this, {
+      direction: "opposite",
+      distancePx: 20,
+      angleRad: angle,
+    });
+    fireBeam(this, {
+      thickness: 30,
+      durationMs: 300,
+      color: 0xffffff,
+      wallPierce: false,
+      maxLength: 600,
+      damage: 29,
+      staggerTime: this.BEAM_STAGGER_TIME,
+      skillKey: "C",
+      baseAngleRad: angle,
+    });
   }
 
   _ensureHitTexture(scene, r) {

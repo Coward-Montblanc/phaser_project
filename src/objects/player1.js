@@ -1,6 +1,7 @@
 import Player, { FACING_TO_RAD } from "./Player.js";
 import { runDash } from "../SkillMech/Dash.js";
 import { fireProjectiles } from "../services/projectiles.js";
+import { spawnVortexField } from "../services/fields.js";
 import {
   ensureSpriteAnimations,
   getIdleFrame,
@@ -25,6 +26,11 @@ export default class Player1 extends Player {
     // 히트박스용 원 텍스처(지름=2R) 1회 생성
     this.HIT_R = 6;
     this.HIT_TEX = this._ensureHitTexture(scene, this.HIT_R);
+    // 메인 충돌 바디를 피격판정(원형) 기준으로 설정
+    if (this.body) {
+      this.body.setCircle(this.HIT_R, 0, 0);
+      this._centerBodyOffsets();
+    }
     // 히트박스 전용 그룹(겹침 판정용, 보이진 않음)
     this.dashGroup = scene.physics.add.group({
       allowGravity: false,
@@ -38,17 +44,16 @@ export default class Player1 extends Player {
     });
 
     // 스킬 구현 바인딩
-    this.bindSkill("Z", () => this._skillSlash180(), {
+    this.bindSkill("Z", () => this._skillConeProjectiles(), {
       mouseAim: true,
-      aimLock: true,
-      aimLockMs: 120,
+      aimLock: false,
     });
     this.bindSkill("X", () => this._skillDashHit(), {
       mouseAim: true,
       aimLock: true,
       aimLockMs: 150,
     });
-    this.bindSkill("C", () => this._skillConeProjectiles(), {
+    this.bindSkill("C", () => this._skillVortexField(), {
       mouseAim: true,
       aimLock: false,
     });
@@ -62,31 +67,35 @@ export default class Player1 extends Player {
 
     // === 캐릭터 고유 스킬 수치 ===
     this.SLASH_DAMAGE = 3;
-    this.DASH_DAMAGE = 5;
+    this.DASH_DAMAGE = 3.6;
     this.DASH_COOLDOWN_MS = 4000;
+    this.DANMAKU_DAMAGE = 6.6;
+    this.FIELD_DAMAGE = 1;
 
     // === 스킬별 스턴 시간 (밀리초) ===
     this.SLASH_STAGGER_TIME = 100; // U스킬: 0.5초 기절 (player2보다 짧음)
-    this.DASH_STAGGER_TIME = 100; // I스킬: 0.8초 기절 (player2보다 짧음)
+    this.DASH_STAGGER_TIME = 1000; // I스킬: 0.8초 기절 (player2보다 짧음)
+    this.PROJ_STAGGER_TIME = 0; // C스킬(투사체) 스턴 시간 (0이면 스턴 없음)
   }
 
   /** 전방 90도 콘으로 5발 투사체 발사 */
   _skillConeProjectiles() {
     // 쿨다운 설정
     const COOLDOWN = 1500;
-    this.setCooldown("C", COOLDOWN);
+    this.setCooldownCurrent(COOLDOWN);
 
     // 파라미터
     const config = {
-      spreadDeg: 10,
+      spreadDeg: 30,
       count: 5,
       radius: Math.floor(Math.max(this.width, this.height) * 0.35),
       speed: 500,
       lifeMs: 1200,
-      damage: 6,
+      damage: this.DANMAKU_DAMAGE,
+      staggerTime: this.PROJ_STAGGER_TIME,
       ricochet: false,
       bounceCount: 0,
-      skillKey: "C",
+      skillKey: "Z",
       baseAngleRad: this._mouseAngleRad(),
       // 초근접 다탄 히트 보장을 위해 총구를 거의 몸 앞(0px)에 두기
       startOffset: 0,
@@ -105,113 +114,238 @@ export default class Player1 extends Player {
     return key;
   }
 
-  /** 전방 180도 반원 휩쓸기 */
-  _skillSlash180() {
+  /** C 스킬: 벽 관통 소형 탄 → 1.5n 이후 히트 시 소용돌이 필드 생성, 3n 이동 시 강제 생성 */
+  _skillVortexField() {
+    const liveAfter = 120;
+    const maxDist = 160;
+    const angle = this.getSkillAimAngle();
+    const speed = 600;
+    const startOffset = Math.max(this.width, this.height) * 0.4;
+
+    // 쿨다운
+    const COOLDOWN = 2500;
+    this.setCooldownCurrent(COOLDOWN);
+
+    // 투사체 생성(간단 원 텍스처 사용)
+    const px = this.x + Math.cos(angle) * startOffset;
+    const py = this.y + Math.sin(angle) * startOffset;
+    const proj = this.projectileGroup.create(px, py, this.HIT_TEX);
+    proj.setVisible(false); // 히트텍스쳐는 보이지 않게, 필요하면 별도 비주얼 추가 가능
+    proj.owner = this;
+    proj.damage = 0;
+    proj.wallPierce = true;
+    proj.body.setAllowGravity(false);
+    proj.body.setImmovable(true);
+    // 작은 원형 충돌로 오버랩 안정성 향상
+    if (proj.body?.setCircle) {
+      proj.body.setCircle(this.HIT_R, 0, 0);
+    }
+    const vx = Math.cos(angle) * speed;
+    const vy = Math.sin(angle) * speed;
+    proj.body.setVelocity(vx, vy);
+
+    proj._sx = px;
+    proj._sy = py;
+    proj._enableHit = false;
+
     const scene = this.scene;
+    const onUpdate = (time, delta) => {
+      if (!proj.active) return;
+      const dx = proj.x - proj._sx;
+      const dy = proj.y - proj._sy;
+      const dist = Math.hypot(dx, dy);
+      if (!proj._enableHit && dist >= liveAfter) {
+        proj._enableHit = true;
+      }
+      if (dist >= maxDist) {
+        // 강제 필드 생성 후 종료
+        spawnVortexField(scene, this, {
+          cx: proj.x,
+          cy: proj.y,
+          side: 80,
+          durationMs: 3000,
+          tickDamage: this.FIELD_DAMAGE * 0.25,
+          tickIntervalMs: 50,
+          slowPercent: 0.2,
+          slowDurationMs: 50,
+        });
+        proj.destroy();
+      }
+    };
+    scene.events.on("update", onUpdate);
+    proj.on("destroy", () => scene.events.off("update", onUpdate));
 
-    // 쿨다운 & 연출 파라미터
-    const COOLDOWN = 400;
-    const LIFETIME = 50;
-    const RADIUS = 48; // 부채꼴 시각효과 끝 반경
-    const RINGS = 3;
-    const DOTS_PER_RING = 10;
-    const SWEEP = Math.PI; // 180도
-    const baseAngle = this.getSkillAimAngle();
-    this.setCooldown("Z", COOLDOWN);
-    this.lockMovement(LIFETIME);
-    // 세션 종료 예약
-    this.scene.time.delayedCall(LIFETIME + 60, () =>
-      this.endAttackSession("U")
-    );
-
-    // 시각효과(선택): 반투명 부채꼴 그리기
-    const g = scene.add.graphics().setDepth(10);
-    this._sweepFanVfx(
-      this.x,
-      this.y,
-      baseAngle,
-      RADIUS,
-      LIFETIME,
-      0xc50058,
-      0.3
-    );
-    scene.tweens.add({
-      targets: g,
-      alpha: 0,
-      duration: LIFETIME,
-      onComplete: () => g.destroy(),
+    // 시간 기반 히트 활성화: 각도/프레임 순서와 무관하게 liveAfter 이후에 유효히트
+    const enableDelayMs = (liveAfter / Math.max(1, speed)) * 950;
+    scene.time.delayedCall(enableDelayMs, () => {
+      if (proj && proj.active) proj._enableHit = true;
     });
 
-    // === 여기부터 '원 전체가 부채꼴 내부'가 되도록 보정 ===
-    const HIT_R = this.HIT_R; // 원 히트박스 반지름(예: 6)
-    const INNER = HIT_R; // 안쪽은 중심이 최소 HIT_R 떨어져 있어야 함
-    const OUTER = Math.max(INNER, RADIUS - HIT_R); // 바깥쪽도 HIT_R만큼 안쪽으로
-
-    for (let ring = 1; ring <= RINGS; ring++) {
-      const rad = INNER + (OUTER - INNER) * (ring / RINGS); // 보정된 반경
-
-      // 양끝 각도 여유: 경계선까지의 수직거리 r*sin(margin) >= HIT_R
-      // => margin = asin(HIT_R / r)
-      const margin = Math.asin(Math.min(1, HIT_R / Math.max(rad, 0.0001)));
-
-      // 원 중심이 머무를 수 있는 각 구간(부채꼴 가장자리에서 margin만큼 깎음)
-      const start = baseAngle - SWEEP / 2 + margin;
-      const end = baseAngle + SWEEP / 2 - margin;
-      if (end <= start) continue; // 너무 가까우면 스킵
-
-      for (let i = 0; i < DOTS_PER_RING; i++) {
-        const t = DOTS_PER_RING === 1 ? 0.5 : i / (DOTS_PER_RING - 1);
-        const ang = start + t * (end - start);
-        const px = this.x + Math.cos(ang) * rad;
-        const py = this.y + Math.sin(ang) * rad;
-
-        const dot = this.slashGroup.create(px, py, this.HIT_TEX);
-        dot.setOrigin(0.5, 0.5);
-        dot.setVisible(false); // 디버그 시 true
-        dot.owner = this;
-        dot.damage = this.SLASH_DAMAGE; // ⬅️ 슬래시 피해량
-        dot.staggerTime = this.SLASH_STAGGER_TIME; // ⬅️ 슬래시 스턴 시간
-        dot.skillId = this.getAttackSegmentId("U", 0); // 한 번의 베기(세그먼트 0)
-        dot.body.setAllowGravity(false);
-        dot.body.setImmovable(true);
-        dot.body.setCircle(HIT_R, 0, 0); // 중심 = (px, py)
-
-        scene.time.delayedCall(LIFETIME, () => dot.destroy());
-      }
-    }
-    // 실제 타격은 GameScene 쪽 overlap 콜백에서 처리(아래 참고)
+    // 히트 처리: 1.5n 이전엔 스킵, 이후엔 필드 생성하고 종료
+    proj.onHit = (target, gameScene) => {
+      if (!proj._enableHit) return "skip"; // 자동 파괴/피해 처리 막기
+      spawnVortexField(scene, this, {
+        cx: proj.x,
+        cy: proj.y,
+        side: 80,
+        durationMs: 3000,
+        tickDamage: this.FIELD_DAMAGE * 0.25,
+        tickIntervalMs: 50,
+        slowPercent: 0.2,
+        slowDurationMs: 50,
+      });
+      if (proj && proj.active) proj.destroy();
+      return "handled";
+    };
   }
 
   /** 전방 대시 */
   _skillDashHit() {
-    // 캐릭터 고유 쿨타임
+    // 새 X 스킬: 근접 포착 → 은신(0.3s) → 적 뒤 재등장 + 피해/스턴
+    const DETECT_RADIUS = 90; // 탐지 반경(px)
+    const REAPPEAR_DELAY = 300; // ms
+
+    const enemies = (this.scene?.targets?.getChildren?.() || []).filter(
+      (t) => t !== this && t.active
+    );
+    let nearest = null;
+    let bestD2 = Infinity;
+    for (const e of enemies) {
+      const dx = e.x - this.x;
+      const dy = e.y - this.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 <= DETECT_RADIUS * DETECT_RADIUS && d2 < bestD2) {
+        bestD2 = d2;
+        nearest = e;
+      }
+    }
+
+    if (!nearest) {
+      // 포착 실패: 쿨타임만 소모
+      this.setCooldown("X", this.DASH_COOLDOWN_MS);
+      return;
+    }
+
+    // 포착 성공: 쿨다운 시작 및 이동/입력 잠금
     this.setCooldown("X", this.DASH_COOLDOWN_MS);
-    runDash(this, {
-      distance: 100,
-      speed: 900,
-      width: 12,
-      damage: this.DASH_DAMAGE, // ⬅️ 대시 피해량
-      staggerTime: this.DASH_STAGGER_TIME, // ⬅️ 대시 스턴 시간
-      attack: true, // ⬅️ 대시 공격 여부 (true: 히트판정 생성)
-      invincible: false, // ⬅️ 대시 중 무적 여부 (true: 피해 무시)
-      wall: {
-        layer: this.wallLayer, // GameScene에서 this.player.wallLayer = this.wallLayer; 해둔 값
-        mode: "block_landing", // 'always' | 'block_landing' | 'block_all'
-        pad: this.HIT_R + 1,
-      },
-      hit: {
-        enabled: true,
-        radius: this.HIT_R,
-        step: this.HIT_R * 1.2,
-        group: this.dashGroup, // 없으면 모듈이 자동 생성
-      },
-      effect: {
-        // spriteKey: 'dashBeam',       // 나중에 스프라이트 쓰고 싶으면 키 전달
-        color: 0xc50058,
-        alpha: 0.35,
-      },
-      angleRad: this.getSkillAimAngle(),
-      skillKey: "X",
+    this.lockMovement(REAPPEAR_DELAY + 50);
+
+    // 원 위치/벡터 스냅샷
+    const startX = this.x;
+    const startY = this.y;
+    const tx = nearest.x;
+    const ty = nearest.y;
+    const vx = tx - startX;
+    const vy = ty - startY;
+    const vlen = Math.hypot(vx, vy) || 1;
+    const nx = vx / vlen;
+    const ny = vy / vlen;
+
+    // 잠시 은신(피격 및 충돌 방지)
+    this.setVelocity(0, 0);
+    const prevVisible = this.visible;
+    const prevBodyEnable = this.body?.enable ?? true;
+    this.setVisible(false);
+    if (this.body) this.body.enable = false;
+
+    // 카메라: 사라지는 타이밍에 타겟 위치로 이동
+    const cam = this.scene?.cameras?.main;
+    const hadFollow = !!cam?._follow; // 내부 플래그(팔로우 여부 추정)
+    if (cam) {
+      try {
+        cam.stopFollow();
+      } catch (_) {}
+      cam.pan(tx, ty, REAPPEAR_DELAY, "Sine.easeInOut", true);
+    }
+
+    // 재등장 위치: 적의 뒤(타겟 반경 + 내 반경 + 여유)
+    const targetR = Math.max(
+      nearest.HIT_R ?? 0,
+      Math.max(nearest.body?.width || 0, nearest.body?.height || 0) / 2
+    );
+    const selfR =
+      this.HIT_R ?? Math.max(this.body?.width || 0, this.body?.height || 0) / 2;
+    const offset = Math.max(8, targetR + selfR + 2);
+
+    // 벽 충돌을 피해서 뒤쪽 방향으로 가능한 위치를 탐색(2px 스텝 역추적)
+    const layer = this.wallLayer;
+    const isFree = (x, y, r) => {
+      if (!layer) return true;
+      // 8방 샘플
+      const pts = [
+        { x: x - r, y },
+        { x: x + r, y },
+        { x, y: y - r },
+        { x, y: y + r },
+        { x: x - r * 0.7071, y: y - r * 0.7071 },
+        { x: x + r * 0.7071, y: y - r * 0.7071 },
+        { x: x - r * 0.7071, y: y + r * 0.7071 },
+        { x: x + r * 0.7071, y: y + r * 0.7071 },
+      ];
+      for (const p of pts) {
+        const tx = layer.worldToTileX(p.x);
+        const ty = layer.worldToTileY(p.y);
+        if (layer.hasTileAt(tx, ty)) return false;
+      }
+      return true;
+    };
+
+    let appearX = tx + nx * offset;
+    let appearY = ty + ny * offset;
+    for (let back = 0; back <= offset; back += 2) {
+      const ax = tx + nx * (offset - back);
+      const ay = ty + ny * (offset - back);
+      if (isFree(ax, ay, selfR)) {
+        appearX = ax;
+        appearY = ay;
+        break;
+      }
+    }
+
+    // 재등장 예약: 피해/스턴 적용 포함
+    this.scene.time.delayedCall(REAPPEAR_DELAY, () => {
+      // 위치 이동 및 재등장
+      this.setPosition(appearX, appearY);
+      this.setVisible(prevVisible);
+      if (this.body) this.body.enable = prevBodyEnable;
+
+      // 바라보는 방향을 타겟을 향하게
+      const fx = tx - this.x;
+      const fy = ty - this.y;
+      const a = Math.atan2(fy, fx);
+      const dirs = [
+        "right",
+        "down-right",
+        "down",
+        "down-left",
+        "left",
+        "up-left",
+        "up",
+        "up-right",
+      ];
+      let idx = Math.round(a / (Math.PI / 4));
+      idx = ((idx % 8) + 8) % 8;
+      this.facing = dirs[idx];
+      this.playIdle();
+
+      // 카메라: 플레이어 재등장 후 다시 팔로우 시작
+      if (cam) {
+        try {
+          cam.startFollow(this, true, 0.15, 0.15);
+        } catch (_) {}
+      }
+
+      // 피해/스턴 적용
+      if (
+        nearest &&
+        nearest.active &&
+        typeof nearest.receiveDamage === "function"
+      ) {
+        const dmg = this.DASH_DAMAGE ?? 5;
+        const staggerMs = this.DASH_STAGGER_TIME ?? 0;
+        const skillId = this.getAttackSegmentId("X", 0);
+        nearest.receiveDamage(dmg, this, skillId, staggerMs);
+      }
     });
   }
 
