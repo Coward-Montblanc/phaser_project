@@ -24,7 +24,9 @@ export default class GameScene extends Phaser.Scene {
     preloadUnifiedSprite(this);
   }
 
-  create() {
+  create(data) {
+    // --- 모드 플래그 ---
+    this.debugMode = !!(data && data.debugMode);
     // --- 맵/레이어 ---
     const map = this.make.tilemap({ key: "map1" });
     const tileset = map.addTilesetImage(
@@ -95,48 +97,54 @@ export default class GameScene extends Phaser.Scene {
     // --- 타겟 그룹(피격 대상) ---
     this.targets = this.physics.add.group();
 
-    // --- 플레이어들 생성 (테스트용 2인) ---
-    const dummy = new Player1(this, GAME.START_TILE.X + 4, GAME.START_TILE.Y);
-
-    // 더미는 움직이지 않게
-    dummy.body.moves = false;
-    dummy.setTint(0xffaaaa);
-
-    // 더미 캐릭터 체력 설정
-    dummy.maxHp = 30;
-    dummy.hp = 30;
-    // 더미 체력 로그: 체력 변동 시 콘솔 표기
-    dummy.events.on("hp:changed", ({ hp, maxHp }) => {
-      console.log(`[DUMMY] HP: ${hp}/${maxHp}`);
-    });
-    // 초기 상태도 1회 표기
-    dummy.events.emit("hp:changed", { hp: dummy.hp, maxHp: dummy.maxHp });
-
-    // 더미 캐릭터 체력바 생성
-    this._createHealthBar(dummy);
-
-    // 타겟으로 등록
+    // 타겟으로 등록 (항상 플레이어는 포함)
     this.targets.add(this.player);
-    this.targets.add(dummy);
 
-    // 더미 캐릭터 참조 저장
-    this.dummy = dummy;
+    // --- 디버그 모드일 때만 더미 생성 ---
+    if (this.debugMode) {
+      const dummyKey = (data && data.dummyCharacter) || this.registry.get("selectedDummyCharacter") || "player1";
+      const createByKey = (key, tx, ty) => {
+        if (key === "player2") return new Player2(this, tx, ty);
+        if (key === "player3") return new Player3(this, tx, ty);
+        if (key === "player4") return new Player4(this, tx, ty);
+        if (key === "tempplayer1") return new TempPlayer1(this, tx, ty);
+        if (key === "tempplayer2") return new TempPlayer2(this, tx, ty);
+        return new Player1(this, tx, ty);
+      };
+      const dummy = createByKey(dummyKey, GAME.START_TILE.X + 4, GAME.START_TILE.Y);
+      dummy.body.moves = false;
+      dummy.setTint(0xffaaaa);
+      // 더미도 벽 충돌 판단을 위해 동일 레이어 참조 필요
+      dummy.wallLayer = wallLayer;
+      dummy.maxHp = dummy.maxHp || 30;
+      dummy.hp = Math.min(dummy.maxHp, dummy.hp || dummy.maxHp);
+      dummy.events.on("hp:changed", ({ hp, maxHp }) => {
+        console.log(`[DUMMY] HP: ${hp}/${maxHp}`);
+      });
+      dummy.events.emit("hp:changed", { hp: dummy.hp, maxHp: dummy.maxHp });
+      this._createHealthBar(dummy);
+      this.targets.add(dummy);
+      this.dummy = dummy;
 
-    // --- 디버그: 플레이어-더미 거리 표시 (physics.arcade.debug가 true일 때만)
-    const physCfg = (this.sys?.game?.config?.physics || {}).arcade || {};
-    this._debugArcadeEnabled = !!physCfg.debug;
-    if (this._debugArcadeEnabled) {
-      this._distText = this.add
-        .text(8, 8, "dist(player,dummy): -", {
-          fontSize: "12px",
-          fill: "#e6e6e6",
-          fontFamily:
-            "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-          stroke: "#000000",
-          strokeThickness: 3,
-        })
-        .setScrollFactor(0)
-        .setDepth(1000);
+      // --- 디버그 오버레이 텍스트 (물리 디버그 시)
+      const physCfg = (this.sys?.game?.config?.physics || {}).arcade || {};
+      this._debugArcadeEnabled = !!physCfg.debug;
+      if (this._debugArcadeEnabled) {
+        this._distText = this.add
+          .text(8, 8, "dist(player,dummy): -", {
+            fontSize: "12px",
+            fill: "#e6e6e6",
+            fontFamily:
+              "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+            stroke: "#000000",
+            strokeThickness: 3,
+          })
+          .setScrollFactor(0)
+          .setDepth(1000);
+      }
+
+      // 디버그 패널 UI
+      this._createDebugPanel();
     }
 
     // 조작 주체의 slashGroup과 타겟 간 겹침 판정
@@ -290,8 +298,10 @@ export default class GameScene extends Phaser.Scene {
     this.wallCollider = this.physics.add.collider(this.player, wallLayer);
     this.wallCollider.active = true;
 
-    // 더미 캐릭터 사망 이벤트 리스너
-    this.dummy.events.on("death", () => this._handleDummyDeath());
+    // 더미 캐릭터 사망 이벤트 리스너 (디버그 전용)
+    if (this.debugMode && this.dummy) {
+      this.dummy.events.on("death", () => this._handleDummyDeath());
+    }
 
     // --- 텔레포트 규칙 & 매니저 ---
     const tpRules = [
@@ -336,13 +346,40 @@ export default class GameScene extends Phaser.Scene {
       this.pathfinder
     );
 
-    // 우클릭 시 경로 설정 (기존 경로는 덮어씀)
+    // 우클릭 시 경로 설정 (기존 경로는 덮어씀) 또는 디버그: 더미 위치 이동 1회 처리
     this.input.on("pointerdown", (pointer) => {
-      // 암흑전진 등 특수 상태에서 우클릭 이동 금지
-      if (this._rcMoveDisabled) return;
-      if (pointer.rightButtonDown()) {
-        this.movement.setDestinationWorld(pointer.worldX, pointer.worldY);
+      if (!pointer.rightButtonDown()) return;
+
+      // 디버그: 더미 위치 이동 1회 소비
+      if (this.debugMode && this._awaitMoveDummy && this.dummy) {
+        this._awaitMoveDummy = false;
+        // 버튼 라벨 복구
+        try {
+          const btnMove = document.getElementById("dbgMoveDummy");
+          if (btnMove) btnMove.textContent = "더미 위치 이동";
+        } catch (_) {}
+
+        const tx = this.wallLayer.worldToTileX(pointer.worldX);
+        const ty = this.wallLayer.worldToTileY(pointer.worldY);
+        let targetTile = null;
+        if (!this.wallLayer.hasTileAt(tx, ty)) {
+          targetTile = { tx, ty };
+        } else if (this.pathfinder) {
+          targetTile = this.pathfinder.findNearestWalkable(tx, ty);
+        }
+        if (targetTile) {
+          const wx = this.toWorld(targetTile.tx);
+          const wy = this.toWorld(targetTile.ty);
+          this.dummy.setPosition(wx, wy);
+          // 체력바 동기화
+          this._updateHealthBar(this.dummy);
+        }
+        return; // 플레이어 우클릭 이동은 막음
       }
+
+      // 암흑전진 등 특수 상태에서 우클릭 이동 금지(로컬 플레이어 전용)
+      if (this.player && this.player._rcMoveDisabled) return;
+      this.movement.setDestinationWorld(pointer.worldX, pointer.worldY);
     });
   }
 
@@ -425,7 +462,7 @@ export default class GameScene extends Phaser.Scene {
     );
   }
 
-  // 더미 캐릭터 사망 처리
+  // 더미 캐릭터 사망 처리 (디버그 전용)
   _handleDummyDeath() {
     // 더미 캐릭터 숨기기
     this.dummy.setVisible(false);
@@ -470,5 +507,149 @@ export default class GameScene extends Phaser.Scene {
 
     // 체력바 업데이트
     this._updateHealthBar(this.dummy);
+  }
+
+  // === 디버그 패널: HTML 요소 연동 ===
+  _createDebugPanel() {
+    if (!this.debugMode) return;
+    if (this._debugPanelCreated) return;
+    this._debugPanelCreated = true;
+
+    // DOM 요소 참조
+    const panel = document.getElementById("debugPanel");
+    const btnReset = document.getElementById("dbgResetCd");
+    const btnNoCd = document.getElementById("dbgNoCd");
+    const inputHp = document.getElementById("dbgDummyHp");
+    const btnSetHp = document.getElementById("dbgSetDummyHp");
+    const btnAutoZ = document.getElementById("dbgAutoZ");
+    const btnAutoX = document.getElementById("dbgAutoX");
+    const btnAutoC = document.getElementById("dbgAutoC");
+    const btnMoveDummy = document.getElementById("dbgMoveDummy");
+    if (!panel) return;
+
+    // 표시
+    panel.style.display = "flex";
+
+    // 상태
+    this._auto = { Z: false, X: false, C: false };
+    this._autoTimers = { Z: null, X: null, C: null };
+
+    const updateNoCdLabel = () => {
+      if (!btnNoCd) return;
+      btnNoCd.textContent = `노쿨 모드: ${this.player?.noCooldownMode ? "ON" : "OFF"}`;
+    };
+    const updateAutoLabel = (key) => {
+      const btn = key === "Z" ? btnAutoZ : key === "X" ? btnAutoX : btnAutoC;
+      const name = key === "Z" ? "Z" : key === "X" ? "X" : "C";
+      if (btn) btn.textContent = `더미 자동 ${name}: ${this._auto[key] ? "ON" : "OFF"}`;
+    };
+
+    const startAuto = (key) => {
+      if (!this.dummy) return;
+      if (this._autoTimers[key]) return;
+      const tryUse = () => {
+        if (!this.debugMode || !this.dummy || !this.player) return;
+        const dx = this.player.x - this.dummy.x;
+        const dy = this.player.y - this.dummy.y;
+        this.dummy._debugAimOverrideAngle = Math.atan2(dy, dx);
+        const handler = key === "Z" ? this.dummy.onSkillZ : key === "X" ? this.dummy.onSkillX : this.dummy.onSkillC;
+        if (typeof handler === "function") {
+          this.dummy._tryUseSkill(key, handler);
+        }
+      };
+      this._autoTimers[key] = this.time.addEvent({ delay: 250, loop: true, callback: tryUse });
+    };
+    const stopAuto = (key) => {
+      const ev = this._autoTimers[key];
+      if (ev) ev.remove();
+      this._autoTimers[key] = null;
+    };
+
+    // 리스너 보관해서 teardown 시 제거
+    this._dbgHandlers = [];
+    const on = (el, evt, fn) => {
+      if (!el) return;
+      el.addEventListener(evt, fn);
+      this._dbgHandlers.push({ el, evt, fn });
+    };
+
+    on(btnReset, "click", () => {
+      if (!this.debugMode) return;
+      if (this.player?.resetAllCooldowns) this.player.resetAllCooldowns();
+    });
+    on(btnNoCd, "click", () => {
+      if (!this.debugMode || !this.player) return;
+      this.player.noCooldownMode = !this.player.noCooldownMode;
+      if (this.player.noCooldownMode && this.player.resetAllCooldowns) {
+        this.player.resetAllCooldowns();
+      }
+      updateNoCdLabel();
+    });
+    on(btnSetHp, "click", () => {
+      if (!this.debugMode || !this.dummy || !inputHp) return;
+      const n = Math.max(1, parseInt(inputHp.value, 10) || 1);
+      this.dummy.maxHp = n;
+      this.dummy.hp = Math.min(this.dummy.hp, n);
+      this.dummy.events.emit("hp:changed", { hp: this.dummy.hp, maxHp: this.dummy.maxHp });
+      this._updateHealthBar(this.dummy);
+    });
+    on(btnAutoZ, "click", () => {
+      if (!this.debugMode || !this.dummy) return;
+      this._auto.Z = !this._auto.Z;
+      if (this._auto.Z) startAuto("Z"); else stopAuto("Z");
+      updateAutoLabel("Z");
+    });
+    on(btnAutoX, "click", () => {
+      if (!this.debugMode || !this.dummy) return;
+      this._auto.X = !this._auto.X;
+      if (this._auto.X) startAuto("X"); else stopAuto("X");
+      updateAutoLabel("X");
+    });
+    on(btnAutoC, "click", () => {
+      if (!this.debugMode || !this.dummy) return;
+      this._auto.C = !this._auto.C;
+      if (this._auto.C) startAuto("C"); else stopAuto("C");
+      updateAutoLabel("C");
+    });
+    on(btnMoveDummy, "click", () => {
+      if (!this.debugMode || !this.dummy) return;
+      this._awaitMoveDummy = true;
+      if (btnMoveDummy) btnMoveDummy.textContent = "더미 위치 이동: 우클릭 대기";
+    });
+
+    // 초기 레이블/값 설정
+    updateNoCdLabel();
+    updateAutoLabel("Z");
+    updateAutoLabel("X");
+    updateAutoLabel("C");
+    if (inputHp && this.dummy) inputHp.value = String(this.dummy.maxHp | 0);
+
+    // 씬 종료 시 정리
+    this.events.on("shutdown", () => this._teardownDebugPanel());
+    this.events.on("destroy", () => this._teardownDebugPanel());
+  }
+
+  _teardownDebugPanel() {
+    const panel = document.getElementById("debugPanel");
+    if (panel) panel.style.display = "none";
+    if (this._dbgHandlers) {
+      for (const { el, evt, fn } of this._dbgHandlers) {
+        try { el.removeEventListener(evt, fn); } catch (_) {}
+      }
+      this._dbgHandlers = [];
+    }
+    if (this._autoTimers) {
+      for (const k of ["Z", "X", "C"]) {
+        const ev = this._autoTimers[k];
+        if (ev) ev.remove();
+        this._autoTimers[k] = null;
+      }
+    }
+    // 버튼 라벨 복구 및 대기 상태 해제
+    try {
+      const btnMove = document.getElementById("dbgMoveDummy");
+      if (btnMove) btnMove.textContent = "더미 위치 이동";
+    } catch (_) {}
+    this._awaitMoveDummy = false;
   }
 }

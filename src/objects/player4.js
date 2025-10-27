@@ -154,8 +154,8 @@ export default class Player4 extends Player {
     const scene = this.scene;
     // 이동/스킬 입력 잠금(스킬 중에는 다른 스킬 사용 불가, 경로 이동 무시)
     this.isSkillLock = true;
-    // 우클릭 이동 금지
-    scene._rcMoveDisabled = true;
+    // 우클릭 이동 금지(로컬 플레이어일 때만 적용)
+    if (scene.player === this) this._rcMoveDisabled = true;
 
     // 시작 속도: 0.7, 1.4, 2.1...
     const startMul = Math.min(
@@ -471,8 +471,8 @@ export default class Player4 extends Player {
     }
     this.setVelocity(0, 0);
     this.isSkillLock = false;
-    // 우클릭 이동 재허용
-    scene._rcMoveDisabled = false;
+    // 우클릭 이동 재허용(로컬 플레이어일 때만)
+    if (scene.player === this) this._rcMoveDisabled = false;
     // 상태 초기화(속도/스택)
     this._darkAdvMul = 1;
     this._darkAdvBounces = 0;
@@ -481,10 +481,12 @@ export default class Player4 extends Player {
     this._stopDarknessBuff();
     if (withCooldown) this.setCooldown("Z", this.DARK_COOLDOWN_MS);
 
-    // 이전 이동 명령(경로) 제거
-    try {
-      this.scene?.movement?.clear?.();
-    } catch (_) {}
+    // 이전 이동 명령(경로) 제거 — 로컬 플레이어일 때만
+    if (scene.player === this) {
+      try {
+        this.scene?.movement?.clear?.();
+      } catch (_) {}
+    }
   }
 
   _ensureHitTexture(scene, r) {

@@ -66,6 +66,10 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
     // 스킬 메타/충전 상태
     this.skillConfigs = new Map(); // key -> { charged, maxCharges, rechargeMs, useCooldownMs }
     this.skillChargeState = new Map(); // key -> { charges, nextRechargeAt }
+    // 디버그/보조 기능
+    this.noCooldownMode = false; // 노쿨 모드 토글
+    this._debugAimOverrideAngle = null; // 디버그 에임 고정(더미 자동 사용용)
+    this._rcMoveDisabled = false; // 우클릭 이동 금지(로컬 플레이어 전용 스위치)
     // HP(캐릭터 파일에서 덮어쓰기 권장)
     this.maxHp = 1;
     this.hp = this.maxHp;
@@ -175,6 +179,10 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
 
   /** 현재 마우스 각도(잠금 무시, 즉시 계산) */
   _mouseAngleRad() {
+    // 디버그 에임 오버라이드가 있으면 우선 사용
+    if (this._debugAimOverrideAngle !== null && this._debugAimOverrideAngle !== undefined) {
+      return this._debugAimOverrideAngle;
+    }
     const pointer = this.scene.input.activePointer;
     pointer.updateWorldPoint(this.scene.cameras.main);
     const dx = pointer.worldX - this.x;
@@ -613,7 +621,8 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
         charges: 0,
         nextRechargeAt: 0,
       };
-      if (now >= next && state.charges > 0 && typeof cb === "function") {
+      const chargeAvailable = this.noCooldownMode ? true : state.charges > 0;
+      if (now >= next && chargeAvailable && typeof cb === "function") {
         // 공통 에임 각도 스냅샷
         this._skillAimAngle = cfg.mouseAim
           ? this._mouseAngleRad()
@@ -634,16 +643,18 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
         this._activeSkillKey = key;
         cb.call(this);
         this._activeSkillKey = null;
-        state.charges = Math.max(0, (state.charges | 0) - 1);
-        if (state.charges < (cfg.maxCharges ?? 1)) {
-          const now2 = this.scene.time.now;
-          const nextAt =
-            state.nextRechargeAt && state.nextRechargeAt > now2
-              ? state.nextRechargeAt
-              : now2 + (cfg.rechargeMs ?? 1000);
-          state.nextRechargeAt = nextAt;
-        } else {
-          state.nextRechargeAt = 0;
+        if (!this.noCooldownMode) {
+          state.charges = Math.max(0, (state.charges | 0) - 1);
+          if (state.charges < (cfg.maxCharges ?? 1)) {
+            const now2 = this.scene.time.now;
+            const nextAt =
+              state.nextRechargeAt && state.nextRechargeAt > now2
+                ? state.nextRechargeAt
+                : now2 + (cfg.rechargeMs ?? 1000);
+            state.nextRechargeAt = nextAt;
+          } else {
+            state.nextRechargeAt = 0;
+          }
         }
         this.skillChargeState.set(key, state);
       }
@@ -677,8 +688,14 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
 
   setCooldown(key, msFromNow) {
     const now = this.scene.time.now;
-    this.cooldowns.set(key, now + msFromNow);
-    this.cooldownDurations.set(key, msFromNow);
+    if (this.noCooldownMode) {
+      // 노쿨: 즉시 사용 가능 상태 유지(지속 HUD 갱신만)
+      this.cooldowns.set(key, now);
+      this.cooldownDurations.set(key, 0);
+    } else {
+      this.cooldowns.set(key, now + msFromNow);
+      this.cooldownDurations.set(key, msFromNow);
+    }
 
     // 새로운 공격 세션 시작(한 번의 스킬 사용 단위)
     this.beginAttackSession(key);
@@ -688,8 +705,8 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
     // HUD가 바로 가려지도록 즉시 1회 알림(초 단위)
     this.events.emit("skill:cd", {
       id: key,
-      cd: msFromNow / 1000,
-      max: msFromNow / 1000,
+      cd: (this.noCooldownMode ? 0 : msFromNow) / 1000,
+      max: (this.noCooldownMode ? 0 : msFromNow) / 1000,
     });
   }
 
@@ -733,6 +750,34 @@ export default class Player extends Phaser.Physics.Arcade.Sprite {
         rechargeLeft: 0,
         rechargeMax: cfg.rechargeMs / 1000,
       });
+    }
+  }
+
+  /** 모든 스킬 쿨다운/충전 상태 초기화 */
+  resetAllCooldowns() {
+    // 쿨다운 초기화
+    this.cooldowns.clear();
+    // 즉시 HUD에 0으로 브로드캐스트
+    for (const [key] of this.skillConfigs) {
+      this.events.emit("skill:cd", { id: key, cd: 0, max: 0 });
+    }
+    // 충전식 스킬은 즉시 풀충전으로
+    for (const [key, cfg] of this.skillConfigs) {
+      if (!cfg) continue;
+      if (cfg.charged) {
+        const state = { charges: cfg.maxCharges, nextRechargeAt: 0 };
+        this.skillChargeState.set(key, state);
+        this.events.emit("skill:charge", {
+          id: key,
+          charges: state.charges,
+          maxCharges: cfg.maxCharges,
+          rechargeLeft: 0,
+          rechargeMax: (cfg.rechargeMs ?? 0) / 1000,
+        });
+      }
+      // 사용 가능 상태도 갱신
+      const en = this._isSkillEnabled(key, cfg);
+      this.events.emit("skill:enabled", { id: key, enabled: !!en });
     }
   }
 

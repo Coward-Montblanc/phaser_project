@@ -11,12 +11,15 @@ export default class CharacterSelect extends Phaser.Scene {
     });
   }
 
-  create() {
+  create(data) {
     // 배경색 설정
     this.cameras.main.setBackgroundColor("#0f1115");
 
+    // 디버그 모드 여부(시작 화면에서 전달)
+    this.debugMode = !!(data && data.debugMode);
+
     // 캐릭터 선택 제목
-    this.add
+    this.titleText = this.add
       .text(this.cameras.main.centerX, 50, "캐릭터 선택", {
         fontSize: "24px",
         fill: "#e6e6e6",
@@ -57,11 +60,13 @@ export default class CharacterSelect extends Phaser.Scene {
     this.placeCharacter(1, this.gridHeight - 1, "tempplayer2", 39);
 
     // 조작 안내
-    this.add
+    this.helpText = this.add
       .text(
         this.cameras.main.centerX,
         this.cameras.main.height - 50,
-        "좌클릭: 캐릭터 고르기 · Z/X/C: 선택",
+        this.debugMode
+          ? "좌클릭: 캐릭터 고르기 · Z: 선택 (2회 선택)"
+          : "좌클릭: 캐릭터 고르기 · Z/X/C: 선택",
         {
           fontSize: "14px",
           fill: "#888888",
@@ -77,6 +82,10 @@ export default class CharacterSelect extends Phaser.Scene {
       X: Phaser.Input.Keyboard.KeyCodes.X,
       C: Phaser.Input.Keyboard.KeyCodes.C,
     });
+
+    // 디버그: 더미 재선택 흐름 상태
+    this._awaitDummy = false;
+    this._firstSelectedKey = null;
 
     // 마우스 좌클릭으로 선택 칸 이동
     this.input.on("pointerdown", (pointer) => {
@@ -145,18 +154,39 @@ export default class CharacterSelect extends Phaser.Scene {
   update() {
     if (!this.keys) return;
 
-    // Z/X/C 중 아무 키로 현재 선택 칸의 캐릭터 확정
-    const confirm =
-      Phaser.Input.Keyboard.JustDown(this.keys.Z) ||
-      Phaser.Input.Keyboard.JustDown(this.keys.X) ||
-      Phaser.Input.Keyboard.JustDown(this.keys.C);
+    // 일반: Z/X/C 모두 허용, 디버그: Z만 허용
+    const confirm = this.debugMode
+      ? Phaser.Input.Keyboard.JustDown(this.keys.Z)
+      : Phaser.Input.Keyboard.JustDown(this.keys.Z) ||
+        Phaser.Input.Keyboard.JustDown(this.keys.X) ||
+        Phaser.Input.Keyboard.JustDown(this.keys.C);
     if (confirm) {
       const key = this.characterSlots.get(
         `${this.selectedX},${this.selectedY}`
       );
       if (key) {
-        this.registry.set("selectedCharacter", key);
-        this.scene.start("GameScene");
+        if (this.debugMode) {
+          if (!this._awaitDummy) {
+            // 1차 선택: 플레이어 캐릭터 확정 → 더미 선택 단계로
+            this._firstSelectedKey = key;
+            this._awaitDummy = true;
+            this.registry.set("selectedCharacter", key);
+            if (this.titleText) this.titleText.setText("더미 선택");
+            if (this.helpText)
+              this.helpText.setText("좌클릭: 캐릭터 고르기 · Z: 더미 확정");
+          } else {
+            // 2차 선택: 더미 캐릭터 확정 → 게임 시작(디버그 모드)
+            this.registry.set("selectedDummyCharacter", key);
+            this.scene.start("GameScene", {
+              debugMode: true,
+              dummyCharacter: key,
+            });
+          }
+        } else {
+          // 일반 모드: 즉시 시작
+          this.registry.set("selectedCharacter", key);
+          this.scene.start("GameScene", { debugMode: false });
+        }
       } else {
         // 빈 칸이면 무시(선택 유지)
       }

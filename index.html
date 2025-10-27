@@ -29,6 +29,32 @@
       gap: 8px;
       z-index: 99999;
     }
+
+    /* 디버그 패널: 게임 캔버스 밖 HTML UI */
+    .debug-panel {
+      position: fixed;
+      top: 60px;
+      right: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px;
+      width: 220px;
+      background: rgba(15, 17, 21, 0.9);
+      border: 1px solid #2a2f3a;
+      border-radius: 10px;
+      z-index: 100000;
+    }
+    .debug-panel h3 { margin: 0 0 6px 0; font-size: 14px; color: #c9c9c9; }
+    .debug-row { display: flex; gap: 6px; align-items: center; }
+    .debug-panel input[type="number"] {
+      flex: 1;
+      background: #0f1115;
+      color: #e6e6e6;
+      border: 1px solid #2a2f3a;
+      border-radius: 8px;
+      padding: 6px 8px;
+    }
   </style>
   <script src="./phaser.min.js"></script>
 </head>
@@ -44,6 +70,21 @@
   </div>
 
   <div id="game"></div>
+
+  <!-- 디버그 패널 (디버그 모드에서만 표시됨) -->
+  <div id="debugPanel" class="debug-panel" style="display:none">
+    <h3>DEBUG</h3>
+    <button id="dbgResetCd">쿨타임 초기화</button>
+    <button id="dbgNoCd">노쿨 모드: OFF</button>
+    <div class="debug-row">
+      <input id="dbgDummyHp" type="number" min="1" value="30" />
+      <button id="dbgSetDummyHp">더미 최대 체력</button>
+    </div>
+    <button id="dbgAutoZ">더미 자동 Q: OFF</button>
+    <button id="dbgAutoX">더미 자동 W: OFF</button>
+    <button id="dbgAutoC">더미 자동 E: OFF</button>
+    <button id="dbgMoveDummy">더미 위치 이동</button>
+  </div>
 
   <script type="module" src="./src/main.js"></script>
 </body>

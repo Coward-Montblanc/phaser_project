@@ -242,9 +242,12 @@ export function runDash(owner, opts) {
     }
 
     // 대시 종료 시 기존 이동 경로 취소(대시 중 입력된 대기 경로는 유지)
-    const mv = owner?.scene?.movement;
-    if (mv && Array.isArray(mv.currentPath)) {
-      mv.currentPath = [];
+    // 로컬 플레이어일 때만 적용 (더미/타 유닛은 로컬 입력에 간섭하지 않음)
+    if (owner?.scene?.player === owner) {
+      const mv = owner?.scene?.movement;
+      if (mv && Array.isArray(mv.currentPath)) {
+        mv.currentPath = [];
+      }
     }
 
     // 이펙트 줄이며 제거 + 샘플 정리
