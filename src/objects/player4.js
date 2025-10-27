@@ -1,5 +1,4 @@
 import Player, { FACING_TO_RAD } from "./Player.js";
-import { runDash } from "../SkillMech/Dash.js";
 import { fireProjectiles } from "../services/projectiles.js";
 import { shakeCamera, getDarkOverlayManager } from "../services/cameraFx.js";
 import { targetKnockback, selfKnockback } from "../services/knockback.js";
@@ -50,14 +49,16 @@ export default class Player4 extends Player {
       aimLock: true,
       aimLockMs: 80,
     });
-    this.bindSkill("X", () => this._skillDashHit(), {
-      mouseAim: true,
-      aimLock: true,
-      aimLockMs: 150,
-    });
-    this.bindSkill("C", () => this._skillConeProjectiles(), {
+    // X: 홀드/떼기 스킬 (길이 충전 후 돌진)
+    this.bindSkill("X", () => this._skillXHoldStart(), {
       mouseAim: true,
       aimLock: false,
+      autoHold: false, // 한 번만 시작, 홀드 중 재호출 방지
+    });
+    this.bindSkill("C", () => this._skillStealthC(), {
+      mouseAim: false,
+      aimLock: false,
+      autoHold: false,
     });
 
     // === 캐릭터 고유 스탯 ===
@@ -70,6 +71,16 @@ export default class Player4 extends Player {
     this.SLASH_DAMAGE = 3;
     this.DASH_DAMAGE = 5;
     this.DASH_COOLDOWN_MS = 4000;
+    // X(홀드 돌진) 수치
+    this.X_HOLD_MAX_MS = 3000; // 최대 홀드 3초
+    this.X_HOLD_GROW_MS = 2000; // 2초 동안 최대 길이 도달
+    this.X_MIN_DIST = 10; // 최소 길이
+    this.X_MAX_DIST = 200; // 최대 길이
+    this.X_DASH_SPEED = 900; // px/s
+    this.X_HIT_DAMAGE = 4; // 1틱 피해
+    this.X_HIT_TICKS = 3; // 총 횟수
+    this.X_STUN_MS = 900; // 적 기절 시간
+    this.X_HIT_INTERVAL_MS = 200; // 피해 간격
     // 암흑전진 수치
     this.DARK_COOLDOWN_MS = 6000; // 완전 종료 후 쿨다운 시작
     this.DARK_START_BASE = 0.7; // 70%
@@ -94,6 +105,12 @@ export default class Player4 extends Player {
     this.SLASH_STAGGER_TIME = 100;
     this.DASH_STAGGER_TIME = 100;
     this.PROJ_STAGGER_TIME = 0;
+
+    // === C: 은신/가속(시야 제한) ===
+    this.C_STEALTH_MS = 1500; // 지속 시간
+    this.C_COOLDOWN_MS = 6000; // 가정: 6초 쿨다운
+    this.C_SPEED_MULT = 1.5; // 이동 속도 50% 증가
+    this.C_FOV_RADIUS = this.DARK_FOV_RADIUS; // 시야 구멍 반경 재사용
   }
 
   /** 전방 90도 콘으로 5발 투사체 발사 */
@@ -502,31 +519,176 @@ export default class Player4 extends Player {
 
   // 기존 Z 임시 스킬 제거됨
 
-  _skillDashHit() {
+  // ===== X: 홀드/떼기 돌진 스킬 =====
+  _skillXHoldStart() {
+    if (this._xHoldActive || this._xDashActive) return;
+    this._xHoldActive = true;
+    this._xHoldStartAt = this.scene.time.now;
+    this._xHoldAngle = this._mouseAngleRad();
+    // 홀드 중 이동 금지 및 우클릭 이동 비활성화
+    this.isSkillLock = true;
+    if (this.scene.player === this) this._rcMoveDisabled = true;
+    // 진행 중인 경로 이동 즉시 취소(로컬 플레이어일 때만)
+    if (this.scene.player === this) {
+      try {
+        this.scene?.movement?.clear?.();
+      } catch (_) {}
+    }
+    // 바 시각화(로컬 플레이어만)
+    if (this.scene.player === this) {
+      this._xHoldGfx = this.scene.add.graphics().setDepth(995);
+    }
+    // 업데이트 훅 등록
+    if (!this._xUpdate) this._xUpdate = (time, delta) => this._xTick(delta);
+    if (!this._xUpdateAttached) {
+      this.scene.events.on("update", this._xUpdate);
+      this._xUpdateAttached = true;
+    }
+  }
+
+  _xCurrentLength(nowMs) {
+    const age = Math.max(0, (nowMs - (this._xHoldStartAt || nowMs)) / 1000);
+    const t = Math.min(1, age / (this.X_HOLD_GROW_MS / 1000));
+    const len = this.X_MIN_DIST + (this.X_MAX_DIST - this.X_MIN_DIST) * t;
+    return Math.max(this.X_MIN_DIST, Math.min(this.X_MAX_DIST, len));
+  }
+
+  _xTick(delta) {
+    const now = this.scene.time.now;
+    // 홀드 단계: 각도/길이 갱신 + 그리기
+    if (this._xHoldActive) {
+      this._xHoldAngle = this._mouseAngleRad();
+      const len = this._xCurrentLength(now);
+      // 자동 릴리즈(최대 홀드 시간 초과)
+      const ageMs = now - (this._xHoldStartAt || now);
+      const shouldRelease = ageMs >= this.X_HOLD_MAX_MS || !this.skillKeys.X.isDown;
+      // 바 렌더링(로컬 전용)
+      if (this._xHoldGfx) {
+        const g = this._xHoldGfx;
+        g.clear();
+        g.fillStyle(0x4fa3ff, 0.35);
+        const width = (this.body?.width || 12);
+        const hw = width / 2;
+        const ang = this._xHoldAngle;
+        const nx = Math.cos(ang), ny = Math.sin(ang);
+        const npx = -ny, npy = nx; // 법선
+        const sx = this.x, sy = this.y;
+        const ex = sx + nx * len, ey = sy + ny * len;
+        g.beginPath();
+        g.moveTo(sx + npx * hw, sy + npy * hw);
+        g.lineTo(ex + npx * hw, ey + npy * hw);
+        g.lineTo(ex - npx * hw, ey - npy * hw);
+        g.lineTo(sx - npx * hw, sy - npy * hw);
+        g.closePath();
+        g.fillPath();
+      }
+      if (shouldRelease) {
+        // 릴리즈: 쿨다운은 여기서 시작
+        const dist = this._xCurrentLength(now);
     this.setCooldown("X", this.DASH_COOLDOWN_MS);
-    runDash(this, {
-      distance: 100,
-      speed: 900,
-      width: 12,
-      damage: this.DASH_DAMAGE,
-      staggerTime: this.DASH_STAGGER_TIME,
-      attack: true,
-      invincible: false,
-      wall: {
-        layer: this.wallLayer,
-        mode: "block_landing",
-        pad: this.HIT_R + 1,
-      },
-      hit: {
-        enabled: true,
-        radius: this.HIT_R,
-        step: this.HIT_R * 1.2,
-        group: this.dashGroup,
-      },
-      effect: { color: 0xc50058, alpha: 0.35 },
-      angleRad: this.getSkillAimAngle(),
-      skillKey: "X",
-    });
+        this._xStartDash(dist, this._xHoldAngle);
+      }
+    }
+
+    // 돌진 단계: 스텝 전진 + 충돌 처리
+    if (this._xDashActive) {
+      const dt = Math.max(1, delta | 0) / 1000;
+      const step = Math.min(this._xDashRemain, Math.max(1, this.X_DASH_SPEED * dt));
+      const ang = this._xDashAngle;
+      const nx = Math.cos(ang), ny = Math.sin(ang);
+      const r = this._entityRadius(this);
+
+      // 작은 스텝으로 이동하며 충돌 검사
+      const subStep = 2;
+      const steps = Math.max(1, Math.ceil(step / subStep));
+      const steplen = step / steps;
+      for (let i = 0; i < steps; i++) {
+        const cx = this.x + nx * steplen;
+        const cy = this.y + ny * steplen;
+        // 적 충돌 우선
+        const t = this._xCheckAttachHit(cx, cy);
+        if (t) {
+          this._xAttachAndHit(t, ang);
+          this._xFinishDash();
+          return;
+        }
+        // 벽 충돌: 마지막 빈칸까지로 종료
+        if (!this._isCircleFree(cx, cy, r)) {
+          this._xFinishDash();
+          return;
+        }
+        this.setPosition(cx, cy);
+        this.playWalk();
+      }
+      this._xDashRemain = Math.max(0, this._xDashRemain - step);
+      if (this._xDashRemain <= 0) {
+        this._xFinishDash();
+      }
+    }
+  }
+
+  _xStartDash(distance, angleRad) {
+    // 홀드 클린업
+    this._xHoldActive = false;
+    if (this._xHoldGfx) {
+      try { this._xHoldGfx.destroy(); } catch (_) {}
+      this._xHoldGfx = null;
+    }
+
+    // 이동/입력 잠금(돌진 중)
+    this.isSkillLock = true;
+    if (this.scene.player === this) this._rcMoveDisabled = true;
+
+    this._xDashActive = true;
+    this._xDashAngle = angleRad;
+    this._xDashRemain = Math.max(this.X_MIN_DIST, Math.min(this.X_MAX_DIST, distance));
+  }
+
+  _xFinishDash() {
+    this._xDashActive = false;
+    this.isSkillLock = false;
+    if (this.scene.player === this) this._rcMoveDisabled = false;
+    // 업데이트 훅 해제
+    if (this._xUpdateAttached && this._xUpdate) {
+      this.scene.events.off("update", this._xUpdate);
+    }
+    this._xUpdateAttached = false;
+    this._xUpdate = null;
+    // 세션 종료(클린업)
+    if (this.endAttackSession) this.endAttackSession("X");
+  }
+
+  _xCheckAttachHit(nextX, nextY) {
+    const targets = this.scene?.targets?.getChildren?.() || [];
+    const selfR = this._entityRadius(this) * 1.2;
+    for (const t of targets) {
+      if (!t || !t.active || t === this) continue;
+      const r = this._entityRadius(t);
+      const dx = t.x - nextX;
+      const dy = t.y - nextY;
+      if (dx * dx + dy * dy <= (selfR + r) * (selfR + r)) {
+        return t;
+      }
+    }
+    return null;
+  }
+
+  _xAttachAndHit(target, angle) {
+    // 접촉 지점에서 멈추고, 대상 기절 + 3회 피해 적용
+    const skillId = this.getAttackSegmentId("X", 0);
+    if (typeof target.receiveDamage === "function") {
+      // 기절(한 번만)
+      target.receiveDamage(0, this, skillId, this.X_STUN_MS);
+      // 3틱 피해 스케줄
+      const applyTick = () => {
+        if (!target || !target.active) return;
+        target.receiveDamage(this.X_HIT_DAMAGE, this, skillId, 0);
+      };
+      for (let i = 0; i < (this.X_HIT_TICKS | 0); i++) {
+        const delay = i * (this.X_HIT_INTERVAL_MS | 0);
+        this.scene.time.delayedCall(delay, applyTick);
+      }
+    }
   }
 
   _facingAngleRad() {
@@ -567,5 +729,73 @@ export default class Player4 extends Player {
       },
     });
     return g;
+  }
+
+  // ===== C: 은신/무적/가속 + 시야 제한 =====
+  _skillStealthC() {
+    // 이미 활성 상태면 무시
+    if (this._cStealthActive) return;
+    this.setCooldown("C", this.C_COOLDOWN_MS);
+
+    this._cStealthActive = true;
+    // 상태 백업
+    this._cPrevAlpha = this.alpha ?? 1;
+    this._cPrevVisible = this.visible;
+    this._cPrevInv = !!this.isInvincible;
+    this._cPrevSpeedMul = this.speedMultiplier ?? 1;
+
+    // 적용: 무적 + 이속 + 시야 제한(본인에게만 어둠 마스크 표시)
+    this.isInvincible = true;
+    this.speedMultiplier = (this._cPrevSpeedMul || 1) * this.C_SPEED_MULT;
+    if (this.scene.player === this) {
+      const mgr = getDarkOverlayManager(this.scene);
+      mgr?.enableSelf(this, this.C_FOV_RADIUS);
+    }
+
+    // 시전 순간 검은 원 플래시(0.1s) — 모두에게 보임
+    {
+      const flash = this.scene.add.graphics().setDepth(996);
+      flash.fillStyle(0x000000, 0.9);
+      flash.fillCircle(this.x, this.y, this.C_FOV_RADIUS);
+      this.scene.tweens.add({ targets: flash, alpha: 0, duration: 100, onComplete: () => flash.destroy() });
+    }
+
+    if (this.scene.player === this) {
+      // 본인 화면: 반투명 + 오라
+      this.setAlpha(0.6);
+      const aura = this.scene.add.graphics().setDepth(996);
+      aura.fillStyle(0x000000, 0.25);
+      aura.fillCircle(0, 0, this.C_FOV_RADIUS);
+      aura.setPosition(this.x, this.y);
+      const auraUpd = () => { if (aura && aura.active) aura.setPosition(this.x, this.y); };
+      this.scene.events.on("postupdate", auraUpd);
+      this._cAura = { g: aura, upd: auraUpd };
+    } else {
+      // 타 시점: 완전 비가시화
+      this.setVisible(false);
+    }
+
+    // 종료 스케줄
+    this.scene.time.delayedCall(this.C_STEALTH_MS, () => this._finishStealthC());
+  }
+
+  _finishStealthC() {
+    if (!this._cStealthActive) return;
+    this._cStealthActive = false;
+    // 상태 복구
+    this.isInvincible = this._cPrevInv;
+    this.speedMultiplier = this._cPrevSpeedMul;
+    this.setAlpha(this._cPrevAlpha);
+    this.setVisible(this._cPrevVisible);
+    if (this.scene.player === this) {
+      const mgr = getDarkOverlayManager(this.scene);
+      mgr?.disableSelf();
+    }
+    // 오라 정리
+    if (this._cAura) {
+      try { this.scene.events.off("postupdate", this._cAura.upd); } catch (_) {}
+      try { this._cAura.g?.destroy?.(); } catch (_) {}
+      this._cAura = null;
+    }
   }
 }
