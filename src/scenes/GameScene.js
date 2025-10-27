@@ -338,6 +338,8 @@ export default class GameScene extends Phaser.Scene {
 
     // 우클릭 시 경로 설정 (기존 경로는 덮어씀)
     this.input.on("pointerdown", (pointer) => {
+      // 암흑전진 등 특수 상태에서 우클릭 이동 금지
+      if (this._rcMoveDisabled) return;
       if (pointer.rightButtonDown()) {
         this.movement.setDestinationWorld(pointer.worldX, pointer.worldY);
       }
@@ -364,6 +366,12 @@ export default class GameScene extends Phaser.Scene {
       if (this.tp.tryFromFree(this.player.facing, this)) {
         return;
       }
+    }
+
+    // 모든 대상의 체력바를 현재 위치로 동기화(넉백/즉시 이동 포함)
+    const targets = this.targets?.getChildren?.() || [];
+    for (const t of targets) {
+      if (t?.healthBar) this._updateHealthBar(t);
     }
   }
 

@@ -1,6 +1,8 @@
 import Player, { FACING_TO_RAD } from "./Player.js";
 import { runDash } from "../SkillMech/Dash.js";
 import { fireProjectiles } from "../services/projectiles.js";
+import { shakeCamera, getDarkOverlayManager } from "../services/cameraFx.js";
+import { targetKnockback, selfKnockback } from "../services/knockback.js";
 import {
   ensureSpriteAnimations,
   getIdleFrame,
@@ -42,11 +44,11 @@ export default class Player4 extends Player {
       immovable: true,
     });
 
-    // 스킬 구현 바인딩(TempPlayer2 복제)
-    this.bindSkill("Z", () => this._skillSlash180(), {
+    // 스킬 구현 바인딩
+    this.bindSkill("Z", () => this._skillDarkAdvance(), {
       mouseAim: true,
       aimLock: true,
-      aimLockMs: 120,
+      aimLockMs: 80,
     });
     this.bindSkill("X", () => this._skillDashHit(), {
       mouseAim: true,
@@ -68,6 +70,25 @@ export default class Player4 extends Player {
     this.SLASH_DAMAGE = 3;
     this.DASH_DAMAGE = 5;
     this.DASH_COOLDOWN_MS = 4000;
+    // 암흑전진 수치
+    this.DARK_COOLDOWN_MS = 6000; // 완전 종료 후 쿨다운 시작
+    this.DARK_START_BASE = 0.7; // 70%
+    this.DARK_START_STEP = 0.7; // 연속 재사용 시 +70% (최대 3회 시 2.1)
+    this.DARK_ACCEL_STEP = 0.1; // 10%
+    this.DARK_ACCEL_INTERVAL = 250; // ms
+    this.DARK_MAX_MUL = 5.0; // 500%
+    this.DARK_FOV_RADIUS = 30; // 어둠 버프 자신의 시야 반경
+    this.DARK_TURN_LIMIT_RAD = (15 * Math.PI) / 180; // 좌/우 15도 제한
+    this.DARK_TURN_INTERVAL_MS = 200; // 방향 변경 간격 제한
+    this.DARK_WALL_AOE_R = 42; // 벽 충돌 시 하얀 원 반경
+    this.DARK_WALL_AOE_TIME = 400; // ms 유지
+    this.DARK_WALL_KB = 70; // 넉백 거리
+    this.DARK_WALL_STUN = 900; // 기절 ms
+    this.DARK_HIT_DMG_MIN = 3; // 플레이어 충돌 최소 피해(이속 70%일 때)
+    this.DARK_HIT_DMG_MAX = 50; // 플레이어 충돌 최대 피해(이속 500%일 때)
+    this.DARK_HIT_STUN = 1200; // 플레이어 충돌 시 스턴 ms
+    this.DARK_SELF_BUMP_WALL = 14; // 벽 충돌 시 자기 넉백
+    this.DARK_SELF_BUMP_HIT = 20; // 플레이어 충돌 시 자기 넉백
 
     // === 스킬별 스턴 시간 (밀리초) ===
     this.SLASH_STAGGER_TIME = 100;
@@ -96,6 +117,376 @@ export default class Player4 extends Player {
     fireProjectiles(this, config);
   }
 
+  // ===== 어둠 버프(시야 마스킹) - 공통 카메라 모듈 사용 =====
+  _startDarknessBuff() {
+    if (this._darkBuffActive) return;
+    const scene = this.scene;
+    this._darkBuffActive = true;
+    const mgr = getDarkOverlayManager(scene);
+    if (scene.player === this) mgr?.enableSelf(this, this.DARK_FOV_RADIUS);
+    else mgr?.enableFor(this, this.DARK_FOV_RADIUS);
+  }
+
+  _stopDarknessBuff() {
+    const scene = this.scene;
+    this._darkBuffActive = false;
+    const mgr = getDarkOverlayManager(scene);
+    if (scene.player === this) mgr?.disableSelf();
+    else mgr?.disableFor(this);
+  }
+
+  // ===== 암흑전진 본체 =====
+  _skillDarkAdvance() {
+    // 이미 진행 중이면 무시
+    if (this._darkAdvActive) return;
+
+    // 버프 부여
+    this._startDarknessBuff();
+
+    // 상태 초기화
+    this._darkAdvActive = true;
+    this._darkAdvBounces = 0; // 벽 재사용 횟수
+    this._darkAdvAngle = this.getSkillAimAngle();
+    this._darkAdvStart();
+  }
+
+  _darkAdvStart() {
+    const scene = this.scene;
+    // 이동/스킬 입력 잠금(스킬 중에는 다른 스킬 사용 불가, 경로 이동 무시)
+    this.isSkillLock = true;
+    // 우클릭 이동 금지
+    scene._rcMoveDisabled = true;
+
+    // 시작 속도: 0.7, 1.4, 2.1...
+    const startMul = Math.min(
+      this.DARK_MAX_MUL,
+      this.DARK_START_BASE + this.DARK_START_STEP * (this._darkAdvBounces | 0)
+    );
+    this._darkAdvMul = startMul;
+
+    // 가속 타이머: 0.25s마다 +0.1, 최대 5.0 (중복 생성 방지)
+    if (!this._darkAccelEvt) {
+      this._darkAccelEvt = scene.time.addEvent({
+        loop: true,
+        delay: this.DARK_ACCEL_INTERVAL,
+        callback: () => {
+          if (!this._darkAdvActive || this._darkAdvWaiting) return;
+          this._darkAdvMul = Math.min(this.DARK_MAX_MUL, this._darkAdvMul + this.DARK_ACCEL_STEP);
+        },
+      });
+    }
+
+    // 프레임 업데이트 등록(중복 on 방지)
+    this._darkAdvWaiting = false;
+    if (!this._darkAdvUpdate) this._darkAdvUpdate = (time, delta) => this._darkAdvTick(delta);
+    if (!this._darkAdvUpdateAttached) {
+      scene.events.on("update", this._darkAdvUpdate);
+      this._darkAdvUpdateAttached = true;
+    }
+    // 방향 변경 쿨다운 초기화
+    this._darkTurnNextAt = scene.time.now; // 즉시 1회 허용
+  }
+
+  _clampAngleTowards(curr, target, limitRad) {
+    let d = Phaser.Math.Angle.Normalize(target - curr);
+    // -PI..PI 범위로 정규화
+    if (d > Math.PI) d -= Math.PI * 2;
+    if (d < -Math.PI) d += Math.PI * 2;
+    if (d > limitRad) d = limitRad;
+    if (d < -limitRad) d = -limitRad;
+    return Phaser.Math.Angle.Wrap(curr + d);
+  }
+
+  _entityRadius(ent) {
+    const bw = ent?.body?.width || 0;
+    const bh = ent?.body?.height || 0;
+    const rHit = ent?.HIT_R || 0;
+    return Math.max(rHit, bw / 2, bh / 2, 6);
+  }
+
+  _isCircleFree(x, y, r) {
+    const layer = this.wallLayer;
+    if (!layer) return true;
+    const pts = [
+      { x: x - r, y },
+      { x: x + r, y },
+      { x, y: y - r },
+      { x, y: y + r },
+      { x: x - r * 0.7071, y: y - r * 0.7071 },
+      { x: x + r * 0.7071, y: y - r * 0.7071 },
+      { x: x - r * 0.7071, y: y + r * 0.7071 },
+      { x: x + r * 0.7071, y: y + r * 0.7071 },
+    ];
+    for (const p of pts) {
+      const tx = layer.worldToTileX(p.x);
+      const ty = layer.worldToTileY(p.y);
+      if (layer.hasTileAt(tx, ty)) return false;
+    }
+    return true;
+  }
+
+  _wallNormalAtPoint(wx, wy) {
+    const layer = this.wallLayer;
+    const map = layer?.tilemap;
+    if (!layer || !map) return { x: 0, y: 0 };
+    const tx = layer.worldToTileX(wx), ty = layer.worldToTileY(wy);
+    // 충돌 타일 기준 주변 벽 분포의 그래디언트 근사
+    let nx = 0, ny = 0;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const ntx = tx + dx, nty = ty + dy;
+        if (layer.hasTileAt(ntx, nty)) {
+          const cx = map.tileToWorldX(tx) + map.tileWidth / 2;
+          const cy = map.tileToWorldY(ty) + map.tileHeight / 2;
+          const wx2 = map.tileToWorldX(ntx) + map.tileWidth / 2;
+          const wy2 = map.tileToWorldY(nty) + map.tileHeight / 2;
+          nx += cx - wx2;
+          ny += cy - wy2;
+        }
+      }
+    }
+    const len = Math.hypot(nx, ny) || 0;
+    if (len === 0) return { x: 0, y: 0 };
+    return { x: nx / len, y: ny / len };
+  }
+
+  _anyTargetHit(nextX, nextY, angle) {
+    const targets = this.scene?.targets?.getChildren?.() || [];
+    const selfR = this._entityRadius(this);
+    const selfRExpanded = selfR * 1.5;
+    for (const t of targets) {
+      if (!t || !t.active || t === this) continue;
+      const r = this._entityRadius(t);
+      const dx = t.x - nextX;
+      const dy = t.y - nextY;
+      if (dx * dx + dy * dy <= (selfRExpanded + r) * (selfRExpanded + r)) {
+        // 피해 + 기절 적용, 즉시 종료
+        const skillId = this.getAttackSegmentId("Z", 0);
+        // 이동속도(배율) 기반 피해 계산: 0.7 -> 3, 5.0 -> 50 선형
+        const minMul = this.DARK_START_BASE;
+        const maxMul = this.DARK_MAX_MUL;
+        const mul = Math.max(minMul, Math.min(maxMul, this._darkAdvMul || minMul));
+        const ratio = (mul - minMul) / Math.max(0.0001, maxMul - minMul);
+        const dmg = Math.round(
+          this.DARK_HIT_DMG_MIN + ratio * (this.DARK_HIT_DMG_MAX - this.DARK_HIT_DMG_MIN)
+        );
+        if (typeof t.receiveDamage === "function") {
+          t.receiveDamage(dmg, this, skillId, this.DARK_HIT_STUN);
+        }
+        // 약간 뒤로 밀기(공격 방향 기준)
+        if (!t.wallLayer) t.wallLayer = this.wallLayer;
+        targetKnockback(this, t, {
+          direction: "skill",
+          distancePx: 50,
+          angleRad: angle,
+        });
+        // 자기 자신도 소폭 반대 방향 넉백
+        selfKnockback(this, { direction: "opposite", distancePx: this.DARK_SELF_BUMP_HIT, angleRad: angle });
+        // 3회째 벽 충돌과 동일 강도의 화면 흔들림
+        shakeCamera(this.scene, { durationMs: 200, intensity: 0.04 });
+        this._darkAdvFinish(true /* withCooldown */);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  _spawnWallImpact(x, y, angle) {
+    const scene = this.scene;
+    // 화면 진동(재사용 횟수에 비례해 강하게)
+    const b = Math.max(0, (this._darkAdvBounces | 0));
+    const level = Math.min(b, 2); // 0,1,2 단계
+    const intensity = 0.02 + 0.01 * level; // 0.02 -> 0.03 -> 0.04
+    const durationMs = 100 + 50 * level; // 100 -> 150 -> 200
+    shakeCamera(scene, { durationMs, intensity });
+    // 하얀 원 이펙트
+    const g = scene.add.graphics().setDepth(996);
+    g.lineStyle(2, 0xffffff, 1);
+    g.strokeCircle(x, y, this.DARK_WALL_AOE_R);
+    scene.tweens.add({ targets: g, alpha: 0, duration: this.DARK_WALL_AOE_TIME, onComplete: () => g.destroy() });
+
+    // 반경 내 적에게 넉백+기절 적용(짧은 기간 동안 주기 확인)
+    const check = () => {
+      const targets = scene?.targets?.getChildren?.() || [];
+      for (const t of targets) {
+        if (!t || !t.active || t === this) continue;
+        const dx = t.x - x;
+        const dy = t.y - y;
+        if (dx * dx + dy * dy <= this.DARK_WALL_AOE_R * this.DARK_WALL_AOE_R) {
+          // 기절만 부여(피해 0)
+          if (typeof t.receiveDamage === "function") {
+            t.receiveDamage(0, this, this.getAttackSegmentId("Z", 1), this.DARK_WALL_STUN);
+          }
+          if (!t.wallLayer) t.wallLayer = this.wallLayer;
+          targetKnockback(this, t, { direction: "skill", distancePx: this.DARK_WALL_KB, angleRad: angle });
+        }
+      }
+    };
+    check();
+    scene.time.delayedCall(120, check);
+  }
+
+  _darkAdvTick(delta) {
+    if (!this._darkAdvActive) return;
+    if (this._darkAdvWaiting) return;
+    const dt = Math.max(1, delta | 0) / 1000; // sec
+
+    // 마우스 좌/우에 따라 각도 보정(±10°), 0.5초 간격으로만 변경
+    const now = this.scene.time.now;
+    if (!this._darkTurnNextAt || now >= this._darkTurnNextAt) {
+      const mouse = this._mouseAngleRad();
+      this._darkAdvAngle = this._clampAngleTowards(
+        this._darkAdvAngle,
+        mouse,
+        this.DARK_TURN_LIMIT_RAD
+      );
+      this._darkTurnNextAt = now + (this.DARK_TURN_INTERVAL_MS || 500);
+    }
+
+    // 진행: 작은 스텝으로 충돌 검사
+    const baseSpeed = this.speed ?? 150;
+    const speed = baseSpeed * this._darkAdvMul;
+    const step = 2; // px
+    const total = Math.max(0.001, speed * dt);
+    const steps = Math.max(1, Math.ceil(total / step));
+    const steplen = total / steps;
+    const nx = Math.cos(this._darkAdvAngle);
+    const ny = Math.sin(this._darkAdvAngle);
+    const r = this._entityRadius(this);
+    for (let i = 0; i < steps; i++) {
+      const cx = this.x + nx * steplen;
+      const cy = this.y + ny * steplen;
+      // 플레이어 충돌 먼저 처리
+      if (this._anyTargetHit(cx, cy, this._darkAdvAngle)) return;
+      // 벽 충돌 검사
+      if (!this._isCircleFree(cx, cy, r)) {
+        // 벽 평행 슬라이드 검사(±20°)
+        const n = this._wallNormalAtPoint(cx, cy);
+        const slideThresh = (25 * Math.PI) / 180;
+        if (n && (n.x !== 0 || n.y !== 0)) {
+          const t1 = { x: -n.y, y: n.x };
+          const t2 = { x: n.y, y: -n.x };
+          const ang = this._darkAdvAngle;
+          const a1 = Math.atan2(t1.y, t1.x);
+          const a2 = Math.atan2(t2.y, t2.x);
+          const d1 = Phaser.Math.Angle.Wrap(a1 - ang);
+          const d2 = Phaser.Math.Angle.Wrap(a2 - ang);
+          let best = a1, d = Math.abs(d1);
+          if (Math.abs(d2) < d) { best = a2; d = Math.abs(d2); }
+          if (d <= slideThresh) {
+            // 접선 방향으로 전진 재시도
+            const sx = this.x + Math.cos(best) * steplen;
+            const sy = this.y + Math.sin(best) * steplen;
+            if (this._isCircleFree(sx, sy, r)) {
+              this._darkAdvAngle = best;
+              this.setPosition(sx, sy);
+              continue;
+            }
+          }
+        }
+        // 3회째 충돌이면 즉시 종료, 아니면 대기 상태로 전환
+        if ((this._darkAdvBounces | 0) >= 2) {
+          this._spawnWallImpact(this.x, this.y, this._darkAdvAngle);
+          // 벽에서 살짝 반대 방향으로 튕김
+          selfKnockback(this, { direction: "opposite", distancePx: this.DARK_SELF_BUMP_WALL, angleRad: this._darkAdvAngle });
+          this.applyStagger(2000);
+          this._darkAdvFinish(true /* withCooldown */);
+          return;
+        }
+        this._spawnWallImpact(this.x, this.y, this._darkAdvAngle);
+        // 벽에서 살짝 반대 방향으로 튕김
+        selfKnockback(this, { direction: "opposite", distancePx: this.DARK_SELF_BUMP_WALL, angleRad: this._darkAdvAngle });
+        this._darkAdvWaitForCommand();
+        return;
+      }
+      this.setPosition(cx, cy);
+    }
+    // 이동 중 애니/방향
+    this.playWalk();
+    const dirs = [
+      "right",
+      "down-right",
+      "down",
+      "down-left",
+      "left",
+      "up-left",
+      "up",
+      "up-right",
+    ];
+    let idx = Math.round(this._darkAdvAngle / (Math.PI / 4));
+    idx = ((idx % 8) + 8) % 8;
+    this.facing = dirs[idx];
+  }
+
+  _darkAdvWaitForCommand() {
+    if (!this._darkAdvActive) return;
+    this._darkAdvWaiting = true;
+    // 정지
+    this.setVelocity(0, 0);
+
+    // 다음 우클릭으로 재시작
+    const scene = this.scene;
+    const handler = (pointer) => {
+      if (!pointer.rightButtonDown()) return; // 이동명령(우클릭)만 허용
+      // 재시작 각도 = 현재 위치에서 클릭 위치 각도
+      const cam = scene.cameras.main;
+      pointer.updateWorldPoint(cam);
+      const dx = pointer.worldX - this.x;
+      const dy = pointer.worldY - this.y;
+      this._darkAdvAngle = Math.atan2(dy, dx);
+
+      scene.input.off("pointerdown", handler);
+      this._darkAdvBounces = (this._darkAdvBounces | 0) + 1;
+      if (this._darkAdvBounces >= 3) {
+        // 3번째 벽 충돌이면 완전 종료 + 자기 2초 기절
+        this.applyStagger(2000);
+        this._darkAdvFinish(true /* withCooldown */);
+      } else {
+        // 다시 시작(시작 속도 상승 규칙 적용)
+        this._darkAdvStart();
+      }
+    };
+    this._darkPointerOnce = handler;
+    scene.input.on("pointerdown", this._darkPointerOnce);
+  }
+
+  _darkAdvFinish(withCooldown) {
+    const scene = this.scene;
+    // 업데이트/타이머 해제
+    if (this._darkAccelEvt) {
+      try { this._darkAccelEvt.remove(false); } catch (_) {}
+      this._darkAccelEvt = null;
+    }
+    if (this._darkAdvUpdateAttached && this._darkAdvUpdate) {
+      scene.events.off("update", this._darkAdvUpdate);
+    }
+    this._darkAdvUpdateAttached = false;
+    this._darkAdvUpdate = null;
+    this._darkAdvActive = false;
+    this._darkAdvWaiting = false;
+    if (this._darkPointerOnce) {
+      try { scene.input.off("pointerdown", this._darkPointerOnce); } catch (_) {}
+      this._darkPointerOnce = null;
+    }
+    this.setVelocity(0, 0);
+    this.isSkillLock = false;
+    // 우클릭 이동 재허용
+    scene._rcMoveDisabled = false;
+    // 상태 초기화(속도/스택)
+    this._darkAdvMul = 1;
+    this._darkAdvBounces = 0;
+
+    // 버프 해제 및 쿨다운 시작
+    this._stopDarknessBuff();
+    if (withCooldown) this.setCooldown("Z", this.DARK_COOLDOWN_MS);
+
+    // 이전 이동 명령(경로) 제거
+    try {
+      this.scene?.movement?.clear?.();
+    } catch (_) {}
+  }
+
   _ensureHitTexture(scene, r) {
     const key = `hit_${r}`;
     if (scene.textures.exists(key)) return key;
@@ -107,65 +498,7 @@ export default class Player4 extends Player {
     return key;
   }
 
-  /** 전방 180도 반원 휩쓸기 */
-  _skillSlash180() {
-    const scene = this.scene;
-    const COOLDOWN = 400;
-    const LIFETIME = 50;
-    const RADIUS = 48;
-    const RINGS = 3;
-    const DOTS_PER_RING = 10;
-    const SWEEP = Math.PI;
-    const baseAngle = this.getSkillAimAngle();
-    this.setCooldown("Z", COOLDOWN);
-    this.lockMovement(LIFETIME);
-    this.scene.time.delayedCall(LIFETIME + 60, () =>
-      this.endAttackSession("U")
-    );
-    const g = scene.add.graphics().setDepth(10);
-    this._sweepFanVfx(
-      this.x,
-      this.y,
-      baseAngle,
-      RADIUS,
-      LIFETIME,
-      0xc50058,
-      0.3
-    );
-    scene.tweens.add({
-      targets: g,
-      alpha: 0,
-      duration: LIFETIME,
-      onComplete: () => g.destroy(),
-    });
-    const HIT_R = this.HIT_R;
-    const INNER = HIT_R;
-    const OUTER = Math.max(INNER, RADIUS - HIT_R);
-    for (let ring = 1; ring <= RINGS; ring++) {
-      const rad = INNER + (OUTER - INNER) * (ring / RINGS);
-      const margin = Math.asin(Math.min(1, HIT_R / Math.max(rad, 0.0001)));
-      const start = baseAngle - SWEEP / 2 + margin;
-      const end = baseAngle + SWEEP / 2 - margin;
-      if (end <= start) continue;
-      for (let i = 0; i < DOTS_PER_RING; i++) {
-        const t = DOTS_PER_RING === 1 ? 0.5 : i / (DOTS_PER_RING - 1);
-        const ang = start + t * (end - start);
-        const px = this.x + Math.cos(ang) * rad;
-        const py = this.y + Math.sin(ang) * rad;
-        const dot = this.slashGroup.create(px, py, this.HIT_TEX);
-        dot.setOrigin(0.5, 0.5);
-        dot.setVisible(false);
-        dot.owner = this;
-        dot.damage = this.SLASH_DAMAGE;
-        dot.staggerTime = this.SLASH_STAGGER_TIME;
-        dot.skillId = this.getAttackSegmentId("U", 0);
-        dot.body.setAllowGravity(false);
-        dot.body.setImmovable(true);
-        dot.body.setCircle(HIT_R, 0, 0);
-        scene.time.delayedCall(LIFETIME, () => dot.destroy());
-      }
-    }
-  }
+  // 기존 Z 임시 스킬 제거됨
 
   _skillDashHit() {
     this.setCooldown("X", this.DASH_COOLDOWN_MS);
