@@ -1,0 +1,17 @@
+{
+  "name": "phaser-colyseus-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@colyseus/schema": "^2.0.28",
+    "colyseus": "^0.15.14",
+    "planck": "^1.0.0",
+    "ws": "^8.18.0"
+  }
+}
+

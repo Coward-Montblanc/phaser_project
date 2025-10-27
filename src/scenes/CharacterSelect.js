@@ -17,6 +17,7 @@ export default class CharacterSelect extends Phaser.Scene {
 
     // 디버그 모드 여부(시작 화면에서 전달)
     this.debugMode = !!(data && data.debugMode);
+    this.room = data && data.room ? data.room : null;
 
     // 캐릭터 선택 제목
     this.titleText = this.add
@@ -183,9 +184,14 @@ export default class CharacterSelect extends Phaser.Scene {
             });
           }
         } else {
-          // 일반 모드: 즉시 시작
+          // 일반 모드: 멀티/로컬 분기
           this.registry.set("selectedCharacter", key);
-          this.scene.start("GameScene", { debugMode: false });
+          if (this.room) {
+            try { this.room.send("selectCharacter", { characterKey: key }); } catch (_) {}
+            this.scene.start("NetGameScene", { room: this.room });
+          } else {
+            this.scene.start("GameScene", { debugMode: false });
+          }
         }
       } else {
         // 빈 칸이면 무시(선택 유지)
